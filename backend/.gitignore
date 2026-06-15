@@ -1,0 +1,4 @@
+/marketingflow.db
+*.db
+/uploads/
+.env
