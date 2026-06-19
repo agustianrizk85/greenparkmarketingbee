@@ -37,6 +37,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	itemH := NewWorkItemHandler(itemSvc)
 	stepH := NewStepHandler(stepSvc, docSvc)
 	dashboardH := NewDashboardHandler(dashboardSvc)
+	metaH := NewMetaHandler(cfg.MetaToken, cfg.MetaAPIVersion, cfg.MetaBusinessID, cfg.MetaAdAccount)
 
 	r := gin.Default()
 	r.MaxMultipartMemory = 32 << 20 // 32 MiB
@@ -51,12 +52,19 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 
+	hub := NewRealtimeHub()
+
 	api := r.Group("/api")
 	{
 		api.POST("/auth/login", authH.Login)
+		// Realtime push: validates its own ?token= (browsers can't set WS headers).
+		api.GET("/ws", hub.ServeWS(tokenMgr))
 
 		authed := api.Group("")
 		authed.Use(middleware.Auth(tokenMgr))
+		// Bump the realtime revision on every successful write so all connected
+		// dashboards refresh instantly.
+		authed.Use(hub.BumpMiddleware())
 		{
 			authed.GET("/auth/me", authH.Me)
 
@@ -79,6 +87,12 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 			// Dashboard: early warning feed.
 			authed.GET("/dashboard/warnings", dashboardH.EarlyWarnings)
+
+			// Meta (Facebook) live data — Ads / WhatsApp / Instagram tabs.
+			authed.GET("/meta/ads", metaH.Ads)
+			authed.GET("/meta/ads/detail", metaH.AdsDetail)
+			authed.GET("/meta/whatsapp", metaH.WhatsApp)
+			authed.GET("/meta/instagram", metaH.Instagram)
 		}
 	}
 

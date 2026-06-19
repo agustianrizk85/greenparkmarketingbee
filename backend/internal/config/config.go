@@ -30,6 +30,12 @@ type Config struct {
 	SeedKadepPassword  string
 	SeedStaffPassword  string
 	SeedViewerPassword string
+
+	// Meta (Facebook) Graph API — powers the Ads / WhatsApp / Instagram tabs.
+	MetaToken      string
+	MetaBusinessID string
+	MetaAPIVersion string
+	MetaAdAccount  string // pin a specific ad account id (without act_); empty = auto-pick by spend
 }
 
 // Load reads configuration from a .env file (if present) and the environment.
@@ -58,6 +64,11 @@ func Load() *Config {
 		SeedKadepPassword:  getEnv("SEED_KADEP_PASSWORD", "kadep123"),
 		SeedStaffPassword:  getEnv("SEED_STAFF_PASSWORD", "staff123"),
 		SeedViewerPassword: getEnv("SEED_VIEWER_PASSWORD", "viewer123"),
+
+		MetaToken:      getEnv("META_ACCESS_TOKEN", ""),
+		MetaBusinessID: getEnv("META_BUSINESS_ID", "146016010006333"),
+		MetaAPIVersion: getEnv("META_API_VERSION", "v21.0"),
+		MetaAdAccount:  getEnv("META_AD_ACCOUNT_ID", ""),
 	}
 }
 
