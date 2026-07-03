@@ -43,6 +43,8 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 		&model.WorkItem{},
 		&model.WorkStep{},
 		&model.Document{},
+		&model.MetaAppConfig{},
+		&model.MetaConnection{},
 	); err != nil {
 		return nil, err
 	}

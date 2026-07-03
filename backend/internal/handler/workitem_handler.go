@@ -15,10 +15,27 @@ import (
 
 type WorkItemHandler struct {
 	items *service.WorkItemService
+	docs  *service.DocumentService
 }
 
-func NewWorkItemHandler(items *service.WorkItemService) *WorkItemHandler {
-	return &WorkItemHandler{items: items}
+func NewWorkItemHandler(items *service.WorkItemService, docs *service.DocumentService) *WorkItemHandler {
+	return &WorkItemHandler{items: items, docs: docs}
+}
+
+// Reset deletes ALL work items, steps and documents (keeping accounts). Gated to
+// Kepala Departemen. Used by the "Hapus Semua Data" action.
+func (h *WorkItemHandler) Reset(c *gin.Context) {
+	counts, err := h.items.DeleteAll()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.docs.PurgeAll(); err != nil {
+		// Rows are already gone; a file-cleanup failure is non-fatal — report it.
+		c.JSON(http.StatusOK, gin.H{"deleted": counts, "warning": "file lampiran tidak terhapus seluruhnya: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": counts})
 }
 
 func (h *WorkItemHandler) Create(c *gin.Context) {

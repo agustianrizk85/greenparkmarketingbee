@@ -1,13 +1,18 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"marketingflow/internal/repository"
 
 	"github.com/gin-gonic/gin"
 )
@@ -15,33 +20,150 @@ import (
 // MetaHandler proxies the Meta (Facebook) Graph API server-side so the access
 // token stays out of the browser and CORS is avoided. It powers the Marketing
 // Ads / WhatsApp / Instagram tabs.
+//
+// The token is resolved per request: the active connected account (OAuth) takes
+// precedence, falling back to the legacy single env token when none is
+// connected. This makes the proxy multi-account aware — switching the active
+// connection switches which account's data every endpoint returns.
 type MetaHandler struct {
-	token      string
-	ver        string
-	businessID string
-	adAccount  string // pinned ad account id (without act_), optional
-	http       *http.Client
+	repo          *repository.MetaRepository
+	envToken      string
+	ver           string
+	envBusinessID string
+	envAdAccount  string // pinned ad account id (without act_), optional
+	http          *http.Client
+
+	// Short-lived response cache: the Ads/Detail pulls fan out to dozens of
+	// Graph calls (20s+), and the dashboard refetches on every realtime push.
+	// A small TTL keeps repeated loads instant without going stale.
+	cmu   sync.Mutex
+	cache map[string]cachedResp
 }
 
-func NewMetaHandler(token, ver, businessID, adAccount string) *MetaHandler {
+type cachedResp struct {
+	at   time.Time
+	body gin.H
+}
+
+func NewMetaHandler(repo *repository.MetaRepository, token, ver, businessID, adAccount string) *MetaHandler {
 	if ver == "" {
 		ver = "v21.0"
 	}
-	return &MetaHandler{token: token, ver: ver, businessID: businessID, adAccount: adAccount, http: &http.Client{Timeout: 25 * time.Second}}
+	return &MetaHandler{repo: repo, envToken: token, ver: ver, envBusinessID: businessID, envAdAccount: adAccount, http: &http.Client{Timeout: 25 * time.Second}, cache: map[string]cachedResp{}}
 }
 
-func (h *MetaHandler) configured() bool { return h.token != "" }
+// getCache returns a cached body if present and younger than ttl.
+func (h *MetaHandler) getCache(key string, ttl time.Duration) (gin.H, bool) {
+	h.cmu.Lock()
+	defer h.cmu.Unlock()
+	if e, ok := h.cache[key]; ok && time.Since(e.at) < ttl {
+		return e.body, true
+	}
+	return nil, false
+}
+
+// setCache stores a successful response body.
+func (h *MetaHandler) setCache(key string, body gin.H) {
+	h.cmu.Lock()
+	h.cache[key] = cachedResp{at: time.Now(), body: body}
+	h.cmu.Unlock()
+}
+
+// metaClient is a request-scoped Graph client bound to the resolved credentials.
+type metaClient struct {
+	token      string
+	ver        string
+	businessID string
+	adAccount  string
+	label      string // connection label (Gp1/Gp2/…) — used as ad-account display name
+	http       *http.Client
+}
+
+// rangePreset maps the UI `range` query param to a Meta Graph `date_preset`.
+// Defaults to the rolling 30-day window. "max" = maximum (lifetime, up to the
+// API's ~37-month limit) so the dashboard can show campaigns across all years.
+func rangePreset(c *gin.Context) string {
+	switch c.Query("range") {
+	case "today":
+		return "today"
+	case "7d":
+		return "last_7d"
+	case "90d":
+		return "last_90d"
+	case "this_year":
+		return "this_year"
+	case "last_year":
+		return "last_year"
+	case "max":
+		return "maximum"
+	default:
+		return "last_30d"
+	}
+}
+
+// clients returns ONE Graph client per connected account so the dashboard can
+// aggregate across every account at once (total spend, all campaigns, all
+// WABAs/IG combined). Falls back to the single env token when no account is
+// connected. Unlike client(), no account pinning is applied here — aggregation
+// lists every account each token can see.
+func (h *MetaHandler) clients() []metaClient {
+	var out []metaClient
+	if h.repo != nil {
+		if conns, err := h.repo.ListConnections(); err == nil {
+			for _, cn := range conns {
+				if cn.AccessToken == "" {
+					continue
+				}
+				businessID := h.envBusinessID
+				if cn.BusinessID != "" {
+					businessID = cn.BusinessID
+				}
+				label := cn.Label
+				if label == "" {
+					label = cn.MetaUserName
+				}
+				out = append(out, metaClient{token: cn.AccessToken, ver: h.ver, businessID: businessID, adAccount: cn.AdAccountID, label: label, http: h.http})
+			}
+		}
+	}
+	if len(out) == 0 && h.envToken != "" {
+		out = append(out, metaClient{token: h.envToken, ver: h.ver, businessID: h.envBusinessID, adAccount: h.envAdAccount, http: h.http})
+	}
+	return out
+}
+
+// connSig returns a cache-key fragment that changes whenever the connected
+// account set — or any account's pinned ad-account / business id / refreshed
+// token — is edited, so a connect / disconnect / swap / edit busts the
+// short-lived response cache instead of serving stale data for up to the TTL.
+// Keying on count alone missed same-count swaps and in-place edits. Falls back
+// to "env" when there's no DB / no connections.
+func (h *MetaHandler) connSig() string {
+	if h.repo == nil {
+		return "env"
+	}
+	conns, err := h.repo.ListConnections()
+	if err != nil || len(conns) == 0 {
+		return "env"
+	}
+	parts := make([]string, 0, len(conns))
+	for _, cn := range conns {
+		parts = append(parts, fmt.Sprintf("%d@%d", cn.ID, cn.UpdatedAt.Unix()))
+	}
+	sort.Strings(parts) // order-independent: ListConnections orders by active/recency
+	return strings.Join(parts, ",")
+}
 
 // graph performs an authenticated GET against the Graph API.
-func (h *MetaHandler) graph(path string, params map[string]string) (map[string]any, error) {
-	u, _ := url.Parse("https://graph.facebook.com/" + h.ver + path)
+func (mc metaClient) graph(path string, params map[string]string) (map[string]any, error) {
+	u, _ := url.Parse("https://graph.facebook.com/" + mc.ver + path)
 	q := u.Query()
-	q.Set("access_token", h.token)
+	q.Set("access_token", mc.token)
 	for k, v := range params {
 		q.Set(k, v)
 	}
 	u.RawQuery = q.Encode()
-	res, err := h.http.Get(u.String())
+	res, err := mc.http.Get(u.String())
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +171,29 @@ func (h *MetaHandler) graph(path string, params map[string]string) (map[string]a
 	var out map[string]any
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 		return nil, err
+	}
+	// Graph reports auth/permission/quota failures in the body (often with a 200),
+	// not as a transport error. Surface it instead of returning an empty result —
+	// otherwise a "(#100) ads_read required" or expired token silently looks like
+	// an account with zero ad accounts ("tidak ada akun iklan").
+	if e, ok := out["error"].(map[string]any); ok {
+		// Prefer Meta's human-facing message (error_user_msg) — it explains the
+		// real cause (e.g. "minta akses lanjutan ke izin instagram_manage_messages")
+		// far better than the terse internal "message" field.
+		msg := gstr(e, "error_user_msg")
+		if msg == "" {
+			msg = gstr(e, "message")
+		}
+		if msg == "" {
+			msg = "Graph API error"
+		}
+		if code := gnum(e, "code"); code != 0 {
+			msg = fmt.Sprintf("%s (#%d)", msg, int(code))
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("Graph API HTTP %d", res.StatusCode)
 	}
 	return out, nil
 }
@@ -126,85 +271,138 @@ func pickAccount(list []any, pinned string) map[string]any {
 // cost-per-result / CTR / CPC) across all accounts, results parsed from the
 // Meta `actions` field.
 func (h *MetaHandler) Ads(c *gin.Context) {
-	if !h.configured() {
+	clients := h.clients()
+	if len(clients) == 0 {
 		c.JSON(http.StatusOK, gin.H{"configured": false})
 		return
 	}
-	acc, err := h.graph("/me/adaccounts", map[string]string{"fields": "id,name,account_status,currency,amount_spent,balance", "limit": "100"})
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"configured": true, "error": err.Error()})
+	preset := rangePreset(c)
+	ckey := "ads:" + preset + ":" + h.connSig()
+	if b, ok := h.getCache(ckey, 90*time.Second); ok {
+		c.JSON(http.StatusOK, b)
 		return
 	}
-	list := dataList(acc)
 
+	allAccounts := []any{}
 	allCampaigns := []gin.H{}
-	var totSpend, totResults, totImpr, totClicks float64
-	var totActive int
-	insFields := "spend,impressions,reach,clicks,ctr,cpc,cpm,actions"
+	seen := map[string]bool{} // dedupe ad accounts across tokens so spend isn't double-counted
+	var totSpend, totResults, totImpr, totClicks, totReach float64
+	var totActive, totDelivering, totIssues int
+	var firstErr string
+	insFields := "spend,impressions,reach,frequency,clicks,ctr,cpc,cpm,actions"
 
-	for _, it := range list {
-		a, _ := it.(map[string]any)
-		if a == nil {
+	// Aggregate across EVERY connected account (each token), not just the active
+	// one. An ad account visible to more than one token is counted once.
+	for _, mc := range clients {
+		acc, err := mc.graph("/me/adaccounts", map[string]string{"fields": "id,name,account_status,currency,amount_spent,balance", "limit": "100"})
+		if err != nil {
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
 			continue
 		}
-		id := gstr(a, "id")
-		// 30-day account summary attached to each account.
-		if ins, e := h.graph("/"+id+"/insights", map[string]string{"date_preset": "last_30d", "fields": "spend,impressions,clicks,ctr"}); e == nil {
-			if d := dataList(ins); len(d) > 0 {
-				a["insights"] = d[0]
+		for _, it := range dataList(acc) {
+			a, _ := it.(map[string]any)
+			if a == nil {
+				continue
 			}
-		}
-		// Campaign meta (status/objective) keyed by id.
-		meta := map[string]map[string]any{}
-		if cm, e := h.graph("/"+id+"/campaigns", map[string]string{"fields": "id,name,status,objective,daily_budget", "limit": "500"}); e == nil {
-			for _, ci := range dataList(cm) {
-				if cmap, ok := ci.(map[string]any); ok {
-					meta[gstr(cmap, "id")] = cmap
+			id := gstr(a, "id")
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			// Friendly name from the connection label that surfaced this account
+			// (Meta's own account name is often empty). Frontend: name || connLabel || id.
+			if mc.label != "" {
+				a["connLabel"] = mc.label
+			}
+			// Account summary (selected range) attached to each account.
+			if ins, e := mc.graph("/"+id+"/insights", map[string]string{"date_preset": preset, "fields": "spend,impressions,clicks,ctr,reach"}); e == nil {
+				if d := dataList(ins); len(d) > 0 {
+					a["insights"] = d[0]
+				}
+			}
+			allAccounts = append(allAccounts, a)
+			// Campaign meta (status/objective) keyed by id.
+			meta := map[string]map[string]any{}
+			if cm, e := mc.graph("/"+id+"/campaigns", map[string]string{"fields": "id,name,status,effective_status,objective,daily_budget,issues_info", "limit": "500"}); e == nil {
+				for _, ci := range dataList(cm) {
+					if cmap, ok := ci.(map[string]any); ok {
+						meta[gstr(cmap, "id")] = cmap
+					}
+				}
+			}
+			// Per-campaign insights for the selected range.
+			ci, e := mc.graph("/"+id+"/insights", map[string]string{
+				"level": "campaign", "date_preset": preset,
+				"fields": "campaign_id,campaign_name," + insFields, "limit": "500",
+			})
+			if e != nil {
+				continue
+			}
+			for _, row := range dataList(ci) {
+				r, _ := row.(map[string]any)
+				if r == nil {
+					continue
+				}
+				cid := gstr(r, "campaign_id")
+				label, results := resultFromActions(r)
+				spend := gnum(r, "spend")
+				impr := gnum(r, "impressions")
+				clicks := gnum(r, "clicks")
+				reach := gnum(r, "reach")
+				cpr := 0.0
+				if results > 0 {
+					cpr = spend / results
+				}
+				m := meta[cid]
+				status := mstr(m, "status")
+				effStatus := mstr(m, "effective_status")
+				issueCount, issueSummary := issuesOf(m)
+				acctDisplay := gstr(a, "name")
+				if acctDisplay == "" {
+					acctDisplay = gstr(a, "connLabel")
+				}
+				if acctDisplay == "" {
+					acctDisplay = strings.TrimPrefix(id, "act_")
+				}
+				allCampaigns = append(allCampaigns, gin.H{
+					"id": cid, "name": gstr(r, "campaign_name"),
+					"account":         acctDisplay,
+					"accountId":       strings.TrimPrefix(id, "act_"),
+					"status":          status,
+					"effectiveStatus": effStatus,
+					"issues":          issueCount,
+					"issueSummary":    issueSummary,
+					"objective":       strings.TrimPrefix(mstr(m, "objective"), "OUTCOME_"),
+					"spend":           spend, "impressions": impr, "clicks": clicks,
+					"reach": reach, "frequency": gnum(r, "frequency"),
+					"ctr": gnum(r, "ctr"), "cpc": gnum(r, "cpc"), "cpm": gnum(r, "cpm"),
+					"resultLabel": label, "results": results, "costPerResult": cpr,
+				})
+				totSpend += spend
+				totResults += results
+				totImpr += impr
+				totClicks += clicks
+				totReach += reach
+				if status == "ACTIVE" {
+					totActive++
+					if spend > 0 {
+						totDelivering++
+					}
+				}
+				if issueCount > 0 {
+					totIssues++
 				}
 			}
 		}
-		// Per-campaign 30-day insights.
-		ci, e := h.graph("/"+id+"/insights", map[string]string{
-			"level": "campaign", "date_preset": "last_30d",
-			"fields": "campaign_id,campaign_name," + insFields, "limit": "500",
-		})
-		if e != nil {
-			continue
-		}
-		for _, row := range dataList(ci) {
-			r, _ := row.(map[string]any)
-			if r == nil {
-				continue
-			}
-			cid := gstr(r, "campaign_id")
-			label, results := resultFromActions(r)
-			spend := gnum(r, "spend")
-			impr := gnum(r, "impressions")
-			clicks := gnum(r, "clicks")
-			cpr := 0.0
-			if results > 0 {
-				cpr = spend / results
-			}
-			m := meta[cid]
-			status := mstr(m, "status")
-			allCampaigns = append(allCampaigns, gin.H{
-				"id": cid, "name": gstr(r, "campaign_name"),
-				"account":   gstr(a, "name"),
-				"accountId": strings.TrimPrefix(id, "act_"),
-				"status":    status,
-				"objective": strings.TrimPrefix(mstr(m, "objective"), "OUTCOME_"),
-				"spend":     spend, "impressions": impr, "clicks": clicks,
-				"ctr": gnum(r, "ctr"), "cpc": gnum(r, "cpc"),
-				"resultLabel": label, "results": results, "costPerResult": cpr,
-			})
-			totSpend += spend
-			totResults += results
-			totImpr += impr
-			totClicks += clicks
-			if status == "ACTIVE" {
-				totActive++
-			}
-		}
+	}
+
+	// Only surface an error when nothing at all came back (one dead token among
+	// several shouldn't blank the whole dashboard).
+	if len(allAccounts) == 0 && firstErr != "" {
+		c.JSON(http.StatusBadGateway, gin.H{"configured": true, "error": firstErr})
+		return
 	}
 
 	// Sort campaigns by spend desc.
@@ -212,14 +410,6 @@ func (h *MetaHandler) Ads(c *gin.Context) {
 		return allCampaigns[i]["spend"].(float64) > allCampaigns[j]["spend"].(float64)
 	})
 
-	out := gin.H{"configured": true, "accounts": list, "campaigns": allCampaigns}
-	chosen := pickAccount(list, h.adAccount)
-	if chosen != nil {
-		out["account"] = chosen
-		if ins, ok := chosen["insights"].(map[string]any); ok {
-			out["insights"] = ins
-		}
-	}
 	cpr := 0.0
 	if totResults > 0 {
 		cpr = totSpend / totResults
@@ -236,25 +426,42 @@ func (h *MetaHandler) Ads(c *gin.Context) {
 	if totImpr > 0 {
 		cpm = totSpend / totImpr * 1000
 	}
-	out["totals"] = gin.H{
-		"spend": totSpend, "results": totResults, "costPerResult": cpr,
-		"impressions": totImpr, "clicks": totClicks, "ctr": ctr, "cpc": cpc, "cpm": cpm,
-		"campaigns": len(allCampaigns), "activeCampaigns": totActive,
-		"accounts": len(list),
+	freq := 0.0
+	if totReach > 0 {
+		freq = totImpr / totReach
 	}
-	c.JSON(http.StatusOK, out)
+	cvr := 0.0 // conversion rate: hasil ÷ klik
+	if totClicks > 0 {
+		cvr = totResults / totClicks * 100
+	}
+	result := gin.H{
+		"configured": true,
+		"range":      preset,
+		"accounts":   allAccounts,
+		"campaigns":  allCampaigns,
+		"totals": gin.H{
+			"spend": totSpend, "results": totResults, "costPerResult": cpr,
+			"impressions": totImpr, "clicks": totClicks, "ctr": ctr, "cpc": cpc, "cpm": cpm,
+			"reach": totReach, "frequency": freq, "conversionRate": cvr,
+			"campaigns": len(allCampaigns), "activeCampaigns": totActive,
+			"deliveringCampaigns": totDelivering, "issueCampaigns": totIssues,
+			"accounts": len(allAccounts),
+		},
+	}
+	h.setCache(ckey, result)
+	c.JSON(http.StatusOK, result)
 }
 
 // primaryAccountID resolves the ad account to break down: the pinned one, else
 // the highest-spend account the token can see.
-func (h *MetaHandler) primaryAccountID() string {
-	if h.adAccount != "" {
-		if strings.HasPrefix(h.adAccount, "act_") {
-			return h.adAccount
+func (mc metaClient) primaryAccountID() string {
+	if mc.adAccount != "" {
+		if strings.HasPrefix(mc.adAccount, "act_") {
+			return mc.adAccount
 		}
-		return "act_" + h.adAccount
+		return "act_" + mc.adAccount
 	}
-	acc, _ := h.graph("/me/adaccounts", map[string]string{"fields": "id,amount_spent", "limit": "100"})
+	acc, _ := mc.graph("/me/adaccounts", map[string]string{"fields": "id,amount_spent", "limit": "100"})
 	if a := pickAccount(dataList(acc), ""); a != nil {
 		return gstr(a, "id")
 	}
@@ -262,12 +469,12 @@ func (h *MetaHandler) primaryAccountID() string {
 }
 
 // insightRows fetches insights rows with the standard metric fields + actions.
-func (h *MetaHandler) insightRows(act string, params map[string]string) []map[string]any {
+func (mc metaClient) insightRows(act string, params map[string]string) []map[string]any {
 	base := map[string]string{"date_preset": "last_30d", "limit": "500", "fields": "spend,impressions,clicks,ctr,actions"}
 	for k, v := range params {
 		base[k] = v
 	}
-	r, e := h.graph("/"+act+"/insights", base)
+	r, e := mc.graph("/"+act+"/insights", base)
 	if e != nil {
 		return nil
 	}
@@ -300,40 +507,416 @@ func mapBreakdown(rows []map[string]any, label func(map[string]any) string, limi
 
 // AdsDetail — deep breakdowns for the primary account: daily trend, demographics
 // (age/gender), placement, region, device, and top ads.
+// bdAgg accumulates a breakdown segment's metrics while merging the same label
+// across multiple ad accounts.
+type bdAgg struct {
+	spend, impressions, clicks, results float64
+}
+
+// bdSorted turns an aggregation map into the {label,spend,...} rows the UI
+// expects, sorted by spend desc, keeping the top `limit` (0 = all).
+func bdSorted(m map[string]*bdAgg, limit int) []gin.H {
+	out := make([]gin.H, 0, len(m))
+	for k, a := range m {
+		ctr := 0.0
+		if a.impressions > 0 {
+			ctr = a.clicks / a.impressions * 100
+		}
+		out = append(out, gin.H{
+			"label": k, "spend": a.spend, "impressions": a.impressions,
+			"clicks": a.clicks, "ctr": ctr, "results": a.results,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["spend"].(float64) > out[j]["spend"].(float64) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// dailySorted returns daily rows in chronological order.
+func dailySorted(m map[string]*bdAgg) []gin.H {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]gin.H, 0, len(keys))
+	for _, k := range keys {
+		a := m[k]
+		out = append(out, gin.H{"date": k, "spend": a.spend, "results": a.results, "clicks": a.clicks, "impressions": a.impressions})
+	}
+	return out
+}
+
+// AdsDetail — deep breakdowns aggregated across EVERY connected ad account:
+// daily trend, demographics (age/gender), placement, region, device, top ads.
+// Each segment label is summed across accounts so the cards reflect the whole
+// portfolio, not a single account.
 func (h *MetaHandler) AdsDetail(c *gin.Context) {
-	if !h.configured() {
+	clients := h.clients()
+	if len(clients) == 0 {
 		c.JSON(http.StatusOK, gin.H{"configured": false})
 		return
 	}
-	act := h.primaryAccountID()
-	if act == "" {
-		c.JSON(http.StatusOK, gin.H{"configured": true, "error": "tidak ada akun iklan"})
+	preset := rangePreset(c)
+	ckey := "detail:" + preset + ":" + h.connSig()
+	if b, ok := h.getCache(ckey, 90*time.Second); ok {
+		c.JSON(http.StatusOK, b)
 		return
 	}
 
-	// Daily trend (chronological).
-	daily := []gin.H{}
-	for _, r := range h.insightRows(act, map[string]string{"time_increment": "1"}) {
-		_, res := resultFromActions(r)
-		daily = append(daily, gin.H{"date": gstr(r, "date_start"), "spend": gnum(r, "spend"), "results": res, "clicks": gnum(r, "clicks"), "impressions": gnum(r, "impressions")})
+	// Unique ad accounts across every token, paired with a client that reads it.
+	type acctRef struct {
+		id string
+		mc metaClient
+	}
+	var accts []acctRef
+	seen := map[string]bool{}
+	var firstErr string
+	for _, mc := range clients {
+		acc, err := mc.graph("/me/adaccounts", map[string]string{"fields": "id", "limit": "100"})
+		if err != nil {
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
+			continue
+		}
+		for _, it := range dataList(acc) {
+			a, _ := it.(map[string]any)
+			if a == nil {
+				continue
+			}
+			id := gstr(a, "id")
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			accts = append(accts, acctRef{id: id, mc: mc})
+		}
+	}
+	if len(accts) == 0 {
+		if firstErr != "" {
+			c.JSON(http.StatusBadGateway, gin.H{"configured": true, "error": firstErr})
+		} else {
+			c.JSON(http.StatusOK, gin.H{"configured": true, "error": "tidak ada akun iklan"})
+		}
+		return
 	}
 
-	demo := mapBreakdown(h.insightRows(act, map[string]string{"breakdowns": "age,gender"}),
-		func(r map[string]any) string { return gstr(r, "age") + " · " + gstr(r, "gender") }, 12)
-	placement := mapBreakdown(h.insightRows(act, map[string]string{"breakdowns": "publisher_platform,platform_position"}),
-		func(r map[string]any) string { return gstr(r, "publisher_platform") + " · " + gstr(r, "platform_position") }, 12)
-	region := mapBreakdown(h.insightRows(act, map[string]string{"breakdowns": "region"}),
-		func(r map[string]any) string { return gstr(r, "region") }, 10)
-	device := mapBreakdown(h.insightRows(act, map[string]string{"breakdowns": "impression_device"}),
-		func(r map[string]any) string { return gstr(r, "impression_device") }, 10)
-	topAds := mapBreakdown(h.insightRows(act, map[string]string{"level": "ad", "fields": "ad_name,spend,impressions,clicks,ctr,actions"}),
-		func(r map[string]any) string { return gstr(r, "ad_name") }, 12)
+	daily := map[string]*bdAgg{}
+	demo := map[string]*bdAgg{}
+	place := map[string]*bdAgg{}
+	region := map[string]*bdAgg{}
+	device := map[string]*bdAgg{}
+	topAds := map[string]*bdAgg{}
+	hourly := map[string]*bdAgg{}
+	// Creative winner: aggregated by ad copy (body) joined with live ad metrics.
+	creatives := map[string]*creativeAgg{}
+	add := func(m map[string]*bdAgg, key string, r map[string]any) {
+		if key == "" {
+			return
+		}
+		a := m[key]
+		if a == nil {
+			a = &bdAgg{}
+			m[key] = a
+		}
+		_, res := resultFromActions(r)
+		a.spend += gnum(r, "spend")
+		a.impressions += gnum(r, "impressions")
+		a.clicks += gnum(r, "clicks")
+		a.results += res
+	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"configured": true, "account": act,
-		"daily": daily, "demographics": demo, "placements": placement,
-		"regions": region, "devices": device, "topAds": topAds,
+	for _, ar := range accts {
+		for _, r := range ar.mc.insightRows(ar.id, map[string]string{"date_preset": preset, "time_increment": "1"}) {
+			add(daily, gstr(r, "date_start"), r)
+		}
+		for _, r := range ar.mc.insightRows(ar.id, map[string]string{"date_preset": preset, "breakdowns": "age,gender"}) {
+			add(demo, gstr(r, "age")+" · "+gstr(r, "gender"), r)
+		}
+		for _, r := range ar.mc.insightRows(ar.id, map[string]string{"date_preset": preset, "breakdowns": "publisher_platform,platform_position"}) {
+			add(place, gstr(r, "publisher_platform")+" · "+gstr(r, "platform_position"), r)
+		}
+		for _, r := range ar.mc.insightRows(ar.id, map[string]string{"date_preset": preset, "breakdowns": "region"}) {
+			add(region, gstr(r, "region"), r)
+		}
+		for _, r := range ar.mc.insightRows(ar.id, map[string]string{"date_preset": preset, "breakdowns": "impression_device"}) {
+			add(device, gstr(r, "impression_device"), r)
+		}
+		for _, r := range ar.mc.insightRows(ar.id, map[string]string{"date_preset": preset, "level": "ad", "fields": "ad_name,spend,impressions,clicks,ctr,actions"}) {
+			add(topAds, gstr(r, "ad_name"), r)
+		}
+		for _, r := range ar.mc.insightRows(ar.id, map[string]string{"date_preset": preset, "breakdowns": "hourly_stats_aggregated_by_advertiser_time_zone"}) {
+			add(hourly, gstr(r, "hourly_stats_aggregated_by_advertiser_time_zone"), r)
+		}
+		// Creative winner: standard ads have no asset-feed breakdown, so join
+		// ad-level metrics with each ad's actual creative (body/cta/thumbnail),
+		// aggregated by ad copy so the same winning text isn't repeated.
+		ar.mc.collectCreatives(ar.id, preset, creatives)
+	}
+
+	result := gin.H{
+		"configured": true, "accounts": len(accts),
+		"daily": dailySorted(daily), "demographics": bdSorted(demo, 12), "placements": bdSorted(place, 12),
+		"regions": bdSorted(region, 10), "devices": bdSorted(device, 10), "topAds": bdSorted(topAds, 12),
+		"hourly": hourlySorted(hourly), "creatives": creativesSorted(creatives, 12),
+	}
+	h.setCache(ckey, result)
+	c.JSON(http.StatusOK, result)
+}
+
+// creativeAgg accumulates one ad-copy's performance across the ads that use it.
+type creativeAgg struct {
+	body, title, cta, thumb, resultLabel string
+	spend, results, impressions, clicks  float64
+	ads                                  int
+}
+
+// collectCreatives joins live ad-level metrics with each ad's creative content
+// and folds them into `out`, keyed by ad copy (body → title → name fallback).
+// To stay fast it only resolves creatives for the top-spending ads (batched by
+// id) instead of pulling every ad's creative.
+func (mc metaClient) collectCreatives(act, preset string, out map[string]*creativeAgg) {
+	metrics := map[string]map[string]any{}
+	for _, r := range mc.insightRows(act, map[string]string{"date_preset": preset, "level": "ad", "fields": "ad_id,ad_name,spend,impressions,clicks,actions"}) {
+		if aid := gstr(r, "ad_id"); aid != "" && gnum(r, "spend") > 0 {
+			metrics[aid] = r
+		}
+	}
+	if len(metrics) == 0 {
+		return
+	}
+	// Top spenders only — keep the batch within Graph's 50-id limit.
+	ids := make([]string, 0, len(metrics))
+	for id := range metrics {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return gnum(metrics[ids[i]], "spend") > gnum(metrics[ids[j]], "spend") })
+	if len(ids) > 40 {
+		ids = ids[:40]
+	}
+	batch, err := mc.graph("", map[string]string{"ids": strings.Join(ids, ","), "fields": "id,name,creative{id,body,title,call_to_action_type,thumbnail_url}"})
+	if err != nil {
+		return
+	}
+	for _, id := range ids {
+		ad, _ := batch[id].(map[string]any)
+		if ad == nil {
+			continue
+		}
+		m := metrics[id]
+		cr, _ := ad["creative"].(map[string]any)
+		body := gstr(cr, "body")
+		title := gstr(cr, "title")
+		key := body
+		if key == "" {
+			key = title
+		}
+		if key == "" {
+			key = gstr(ad, "name")
+		}
+		label, results := resultFromActions(m)
+		a := out[key]
+		if a == nil {
+			a = &creativeAgg{body: body, title: title, cta: gstr(cr, "call_to_action_type"), thumb: gstr(cr, "thumbnail_url"), resultLabel: label}
+			out[key] = a
+		}
+		if a.thumb == "" {
+			a.thumb = gstr(cr, "thumbnail_url")
+		}
+		if a.resultLabel == "" {
+			a.resultLabel = label
+		}
+		a.spend += gnum(m, "spend")
+		a.results += results
+		a.impressions += gnum(m, "impressions")
+		a.clicks += gnum(m, "clicks")
+		a.ads++
+	}
+}
+
+// creativesSorted ranks winning ad-copies by results (then spend) desc.
+func creativesSorted(m map[string]*creativeAgg, limit int) []gin.H {
+	out := make([]gin.H, 0, len(m))
+	for _, a := range m {
+		cpr := 0.0
+		if a.results > 0 {
+			cpr = a.spend / a.results
+		}
+		ctr := 0.0
+		if a.impressions > 0 {
+			ctr = a.clicks / a.impressions * 100
+		}
+		out = append(out, gin.H{
+			"body": a.body, "title": a.title, "cta": a.cta, "thumbnail": a.thumb,
+			"resultLabel": a.resultLabel, "spend": a.spend, "results": a.results, "costPerResult": cpr,
+			"impressions": a.impressions, "clicks": a.clicks, "ctr": ctr, "ads": a.ads,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i]["results"].(float64) != out[j]["results"].(float64) {
+			return out[i]["results"].(float64) > out[j]["results"].(float64)
+		}
+		return out[i]["spend"].(float64) > out[j]["spend"].(float64)
 	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// hourlySorted returns hourly breakdown rows in chronological order (00→23h).
+func hourlySorted(m map[string]*bdAgg) []gin.H {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]gin.H, 0, len(keys))
+	for _, k := range keys {
+		a := m[k]
+		ctr := 0.0
+		if a.impressions > 0 {
+			ctr = a.clicks / a.impressions * 100
+		}
+		out = append(out, gin.H{"label": k, "spend": a.spend, "impressions": a.impressions, "clicks": a.clicks, "ctr": ctr, "results": a.results})
+	}
+	return out
+}
+
+// AdsCampaign — deep drill-down for ONE campaign (clickable from the table):
+// headline metrics, daily trend, per-ad breakdown, and audience segments
+// (age/gender, placement) for the selected range. The owning token is found by
+// probing each connected client until the campaign node resolves.
+func (h *MetaHandler) AdsCampaign(c *gin.Context) {
+	id := strings.TrimSpace(c.Query("id"))
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id wajib diisi"})
+		return
+	}
+	preset := rangePreset(c)
+	clients := h.clients()
+	if len(clients) == 0 {
+		c.JSON(http.StatusOK, gin.H{"configured": false})
+		return
+	}
+
+	insFields := "spend,impressions,reach,frequency,clicks,ctr,cpc,cpm,actions"
+	var firstErr string
+	for _, mc := range clients {
+		meta, err := mc.graph("/"+id, map[string]string{"fields": "id,name,status,objective,daily_budget,lifetime_budget,start_time,stop_time,account_id"})
+		if err != nil {
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
+			continue
+		}
+		if gstr(meta, "id") == "" {
+			continue // this token can't see the campaign — try the next
+		}
+
+		// Headline metrics for the range (single campaign-level row).
+		var totals gin.H
+		if rows := mc.insightRows(id, map[string]string{"date_preset": preset, "fields": insFields}); len(rows) > 0 {
+			r := rows[0]
+			label, results := resultFromActions(r)
+			spend := gnum(r, "spend")
+			cpr := 0.0
+			if results > 0 {
+				cpr = spend / results
+			}
+			totals = gin.H{
+				"spend": spend, "impressions": gnum(r, "impressions"), "reach": gnum(r, "reach"),
+				"frequency": gnum(r, "frequency"), "clicks": gnum(r, "clicks"), "ctr": gnum(r, "ctr"),
+				"cpc": gnum(r, "cpc"), "cpm": gnum(r, "cpm"),
+				"resultLabel": label, "results": results, "costPerResult": cpr,
+			}
+		}
+
+		daily := map[string]*bdAgg{}
+		demo := map[string]*bdAgg{}
+		place := map[string]*bdAgg{}
+		ads := map[string]*bdAgg{}
+		adsets := map[string]*bdAgg{}
+		add := func(m map[string]*bdAgg, key string, r map[string]any) {
+			if key == "" {
+				return
+			}
+			a := m[key]
+			if a == nil {
+				a = &bdAgg{}
+				m[key] = a
+			}
+			_, res := resultFromActions(r)
+			a.spend += gnum(r, "spend")
+			a.impressions += gnum(r, "impressions")
+			a.clicks += gnum(r, "clicks")
+			a.results += res
+		}
+		for _, r := range mc.insightRows(id, map[string]string{"date_preset": preset, "time_increment": "1"}) {
+			add(daily, gstr(r, "date_start"), r)
+		}
+		for _, r := range mc.insightRows(id, map[string]string{"date_preset": preset, "breakdowns": "age,gender"}) {
+			add(demo, gstr(r, "age")+" · "+gstr(r, "gender"), r)
+		}
+		for _, r := range mc.insightRows(id, map[string]string{"date_preset": preset, "breakdowns": "publisher_platform,platform_position"}) {
+			add(place, gstr(r, "publisher_platform")+" · "+gstr(r, "platform_position"), r)
+		}
+		for _, r := range mc.insightRows(id, map[string]string{"date_preset": preset, "level": "ad", "fields": "ad_name,spend,impressions,clicks,ctr,actions"}) {
+			add(ads, gstr(r, "ad_name"), r)
+		}
+		for _, r := range mc.insightRows(id, map[string]string{"date_preset": preset, "level": "adset", "fields": "adset_name,spend,impressions,clicks,ctr,actions"}) {
+			add(adsets, gstr(r, "adset_name"), r)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"configured": true,
+			"range":      preset,
+			"campaign": gin.H{
+				"id": gstr(meta, "id"), "name": gstr(meta, "name"), "status": gstr(meta, "status"),
+				"objective":      strings.TrimPrefix(gstr(meta, "objective"), "OUTCOME_"),
+				"dailyBudget":    gnum(meta, "daily_budget"),
+				"lifetimeBudget": gnum(meta, "lifetime_budget"),
+				"startTime":      gstr(meta, "start_time"), "stopTime": gstr(meta, "stop_time"),
+				"accountId": strings.TrimPrefix(gstr(meta, "account_id"), "act_"),
+			},
+			"totals":       totals,
+			"daily":        dailySorted(daily),
+			"demographics": bdSorted(demo, 12),
+			"placements":   bdSorted(place, 12),
+			"ads":          bdSorted(ads, 20),
+			"adsets":       bdSorted(adsets, 20),
+		})
+		return
+	}
+
+	if firstErr != "" {
+		c.JSON(http.StatusBadGateway, gin.H{"configured": true, "error": firstErr})
+		return
+	}
+	c.JSON(http.StatusNotFound, gin.H{"configured": true, "error": "campaign tidak ditemukan"})
+}
+
+// issuesOf reads Graph `issues_info` (delivery problems) from a campaign node
+// and returns the count + a short summary of the first issue.
+func issuesOf(m map[string]any) (int, string) {
+	if m == nil {
+		return 0, ""
+	}
+	arr, _ := m["issues_info"].([]any)
+	if len(arr) == 0 {
+		return 0, ""
+	}
+	summary := ""
+	if first, ok := arr[0].(map[string]any); ok {
+		summary = gstr(first, "error_summary")
+		if summary == "" {
+			summary = gstr(first, "error_message")
+		}
+	}
+	return len(arr), summary
 }
 
 // mstr reads a string field from a possibly-nil map.
@@ -372,29 +955,103 @@ func resultFromActions(r map[string]any) (string, float64) {
 	return "", 0
 }
 
-// WhatsApp — WhatsApp Business Accounts under the business + their phone numbers.
+// discoverBusinessIDs lists the businesses to scan for WhatsApp accounts. It
+// merges three sources so WhatsApp works across multiple Meta accounts with no
+// hand-entered Business ID:
+//   - the explicit pinned / env business id (if any);
+//   - /me/businesses — businesses the user is directly a member of;
+//   - the business that owns each of the token's Pages — this is the only path
+//     that resolves a System User token, whose /me/businesses comes back empty.
+// The returned error only matters when nothing at all resolved.
+func (mc metaClient) discoverBusinessIDs() ([]string, error) {
+	ids := []string{}
+	seen := map[string]bool{}
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	add(mc.businessID) // explicit pin / env default, queried first
+
+	var firstErr error
+	if r, err := mc.graph("/me/businesses", map[string]string{"fields": "id", "limit": "100"}); err == nil {
+		for _, it := range dataList(r) {
+			if b, ok := it.(map[string]any); ok {
+				add(gstr(b, "id"))
+			}
+		}
+	} else {
+		firstErr = err
+	}
+	// Businesses behind the token's Pages — catches System User tokens.
+	if r, err := mc.graph("/me/accounts", map[string]string{"fields": "business", "limit": "100"}); err == nil {
+		for _, it := range dataList(r) {
+			if p, ok := it.(map[string]any); ok {
+				if bz, ok := p["business"].(map[string]any); ok {
+					add(gstr(bz, "id"))
+				}
+			}
+		}
+	} else if firstErr == nil {
+		firstErr = err
+	}
+
+	if len(ids) == 0 {
+		return ids, firstErr
+	}
+	return ids, nil
+}
+
+// WhatsApp — WhatsApp Business Accounts (owned + shared) across every connected
+// account's businesses, with each WABA's phone numbers and message templates.
 func (h *MetaHandler) WhatsApp(c *gin.Context) {
-	if !h.configured() {
+	clients := h.clients()
+	if len(clients) == 0 {
 		c.JSON(http.StatusOK, gin.H{"configured": false})
 		return
 	}
-	r, err := h.graph("/"+h.businessID+"/owned_whatsapp_business_accounts", map[string]string{"fields": "id,name,timezone_id,message_template_namespace"})
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"configured": true, "error": err.Error()})
-		return
-	}
 	wabas := []gin.H{}
-	for _, it := range dataList(r) {
-		w, _ := it.(map[string]any)
-		id := gstr(w, "id")
-		entry := gin.H{"id": id, "name": gstr(w, "name")}
-		if ph, e := h.graph("/"+id+"/phone_numbers", map[string]string{"fields": "display_phone_number,verified_name,quality_rating,code_verification_status,platform_type"}); e == nil {
-			entry["phones"] = dataList(ph)
+	seen := map[string]bool{}
+	var firstErr string
+	for _, mc := range clients {
+		bizIDs, derr := mc.discoverBusinessIDs()
+		if derr != nil && len(bizIDs) == 0 && firstErr == "" {
+			firstErr = derr.Error()
 		}
-		if tpl, e := h.graph("/"+id+"/message_templates", map[string]string{"fields": "name,status,category", "limit": "100"}); e == nil {
-			entry["templates"] = dataList(tpl)
+		for _, bid := range bizIDs {
+			// Owned + client (shared) WABAs — a WABA shared with the business but
+			// owned elsewhere only shows under the client_ edge.
+			for _, edge := range []string{"owned_whatsapp_business_accounts", "client_whatsapp_business_accounts"} {
+				r, err := mc.graph("/"+bid+"/"+edge, map[string]string{"fields": "id,name,timezone_id,message_template_namespace"})
+				if err != nil {
+					if firstErr == "" {
+						firstErr = err.Error()
+					}
+					continue
+				}
+				for _, it := range dataList(r) {
+					w, _ := it.(map[string]any)
+					id := gstr(w, "id")
+					if id == "" || seen[id] {
+						continue
+					}
+					seen[id] = true
+					entry := gin.H{"id": id, "name": gstr(w, "name")}
+					if ph, e := mc.graph("/"+id+"/phone_numbers", map[string]string{"fields": "display_phone_number,verified_name,quality_rating,code_verification_status,platform_type"}); e == nil {
+						entry["phones"] = dataList(ph)
+					}
+					if tpl, e := mc.graph("/"+id+"/message_templates", map[string]string{"fields": "name,status,category", "limit": "100"}); e == nil {
+						entry["templates"] = dataList(tpl)
+					}
+					wabas = append(wabas, entry)
+				}
+			}
 		}
-		wabas = append(wabas, entry)
+	}
+	if len(wabas) == 0 && firstErr != "" {
+		c.JSON(http.StatusBadGateway, gin.H{"configured": true, "error": firstErr})
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"configured": true, "wabas": wabas})
 }
@@ -402,26 +1059,358 @@ func (h *MetaHandler) WhatsApp(c *gin.Context) {
 // Instagram — IG business accounts linked to the token's Pages (may be empty if
 // no instagram_basic scope / no linked IG business account).
 func (h *MetaHandler) Instagram(c *gin.Context) {
-	if !h.configured() {
+	clients := h.clients()
+	if len(clients) == 0 {
 		c.JSON(http.StatusOK, gin.H{"configured": false})
 		return
 	}
-	r, err := h.graph("/me/accounts", map[string]string{
-		"fields": "id,name,fan_count,instagram_business_account{id,username,followers_count,media_count,profile_picture_url}",
-		"limit":  "50",
-	})
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"configured": true, "error": err.Error()})
-		return
-	}
-	pages := dataList(r)
+	allPages := []any{}
 	igs := []any{}
-	for _, it := range pages {
-		p, _ := it.(map[string]any)
-		if ig, ok := p["instagram_business_account"].(map[string]any); ok {
-			ig["page"] = gstr(p, "name")
-			igs = append(igs, ig)
+	seen := map[string]bool{}
+	var firstErr string
+	for _, mc := range clients {
+		r, err := mc.graph("/me/accounts", map[string]string{
+			"fields": "id,name,fan_count,instagram_business_account{id,username,followers_count,media_count,profile_picture_url}",
+			"limit":  "50",
+		})
+		if err != nil {
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
+			continue
+		}
+		for _, it := range dataList(r) {
+			p, _ := it.(map[string]any)
+			if p == nil {
+				continue
+			}
+			allPages = append(allPages, p)
+			if ig, ok := p["instagram_business_account"].(map[string]any); ok {
+				id := gstr(ig, "id")
+				if id != "" && seen[id] {
+					continue
+				}
+				seen[id] = true
+				ig["page"] = gstr(p, "name")
+				igs = append(igs, ig)
+			}
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"configured": true, "pages": pages, "instagram": igs})
+	if len(allPages) == 0 && len(igs) == 0 && firstErr != "" {
+		c.JSON(http.StatusBadGateway, gin.H{"configured": true, "error": firstErr})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"configured": true, "pages": allPages, "instagram": igs})
+}
+
+// ===================== INSTAGRAM INBOX (DM) =====================
+//
+// IG Direct messages are read/sent through the linked Facebook Page using the
+// PAGE access token (not the user token). Reading the conversation list of an
+// account that talks to non-app-role users requires Advanced Access to
+// instagram_manage_messages — until that is granted Graph returns a timeout
+// (#-2) which we surface verbatim via the `limited` field so the UI can explain
+// it instead of showing an empty inbox.
+
+// graphPost performs an authenticated POST with a JSON body (used to send DMs).
+func (mc metaClient) graphPost(path string, body map[string]any) (map[string]any, error) {
+	u, _ := url.Parse("https://graph.facebook.com/" + mc.ver + path)
+	q := u.Query()
+	q.Set("access_token", mc.token)
+	u.RawQuery = q.Encode()
+	b, _ := json.Marshal(body)
+	res, err := mc.http.Post(u.String(), "application/json", bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if e, ok := out["error"].(map[string]any); ok {
+		msg := gstr(e, "error_user_msg")
+		if msg == "" {
+			msg = gstr(e, "message")
+		}
+		if msg == "" {
+			msg = "Graph API error"
+		}
+		if code := gnum(e, "code"); code != 0 {
+			msg = fmt.Sprintf("%s (#%d)", msg, int(code))
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	return out, nil
+}
+
+// sanitizeIGError turns a raw conversations-fetch error into a safe, friendly
+// message. A transport timeout's error string contains the request URL with the
+// page access token embedded — never expose that. Meta's own error_user_msg
+// (which mentions the permission) is clean and kept as-is.
+func sanitizeIGError(raw string) string {
+	if strings.Contains(raw, "instagram_manage_messages") || strings.Contains(raw, "akses lanjutan") {
+		return raw // Meta's human-facing explanation — safe, already descriptive
+	}
+	if strings.Contains(raw, "access_token") || strings.Contains(raw, "graph.facebook.com") ||
+		strings.Contains(raw, "deadline exceeded") || strings.Contains(raw, "Timeout") {
+		return "Daftar percakapan tidak dapat dimuat — Meta memblokir sampai izin instagram_manage_messages mendapat Advanced Access (permintaan ke Meta melebihi batas waktu)."
+	}
+	return raw
+}
+
+// igPage pairs a Facebook Page (with its own page token) to its linked IG
+// business account — everything needed to read/send that account's DMs.
+type igPage struct {
+	pageID    string
+	pageToken string
+	pageName  string
+	igID      string
+	igUser    string
+}
+
+// pageClient builds a request-scoped client bound to a page token.
+func (h *MetaHandler) pageClient(token string) metaClient {
+	return metaClient{token: token, ver: h.ver, http: h.http}
+}
+
+// igPages lists every IG-linked Page across all connected accounts, deduped.
+func (h *MetaHandler) igPages() []igPage {
+	var out []igPage
+	seen := map[string]bool{}
+	for _, mc := range h.clients() {
+		acc, err := mc.graph("/me/accounts", map[string]string{
+			"fields": "id,name,access_token,instagram_business_account{id,username}",
+			"limit":  "50",
+		})
+		if err != nil {
+			continue
+		}
+		for _, it := range dataList(acc) {
+			p, _ := it.(map[string]any)
+			if p == nil {
+				continue
+			}
+			ig, _ := p["instagram_business_account"].(map[string]any)
+			if ig == nil {
+				continue
+			}
+			pid := gstr(p, "id")
+			if pid == "" || seen[pid] {
+				continue
+			}
+			seen[pid] = true
+			out = append(out, igPage{
+				pageID:    pid,
+				pageToken: gstr(p, "access_token"),
+				pageName:  gstr(p, "name"),
+				igID:      gstr(ig, "id"),
+				igUser:    gstr(ig, "username"),
+			})
+		}
+	}
+	return out
+}
+
+func (h *MetaHandler) findIGPage(pageID string) *igPage {
+	for _, pg := range h.igPages() {
+		if pg.pageID == pageID {
+			p := pg
+			return &p
+		}
+	}
+	return nil
+}
+
+// IGConversations — list IG DM threads across every linked account. Each thread
+// carries the customer's name + IGSID (recipient for replies), last snippet, and
+// unread count. On the Advanced-Access timeout the list is empty and `limited`
+// holds Meta's explanation.
+func (h *MetaHandler) IGConversations(c *gin.Context) {
+	if len(h.clients()) == 0 {
+		c.JSON(http.StatusOK, gin.H{"configured": false})
+		return
+	}
+	igKey := "ig:conversations:" + h.connSig()
+	if b, ok := h.getCache(igKey, 60*time.Second); ok {
+		c.JSON(http.StatusOK, b)
+		return
+	}
+	pages := h.igPages()
+
+	// Fetch every page's threads concurrently. Without Advanced Access the
+	// conversations endpoint hangs until Meta's own timeout, so a sequential
+	// loop over N pages would stack N×~25s — fan out so the wall time is one
+	// page, and use a shorter client timeout so a hung call fails fast.
+	fastHTTP := &http.Client{Timeout: 12 * time.Second}
+	type pageResult struct {
+		convs   []gin.H
+		limited string
+	}
+	results := make([]pageResult, len(pages))
+	var wg sync.WaitGroup
+	for i, pg := range pages {
+		wg.Add(1)
+		go func(i int, pg igPage) {
+			defer wg.Done()
+			pmc := metaClient{token: pg.pageToken, ver: h.ver, http: fastHTTP}
+			res, err := pmc.graph("/"+pg.pageID+"/conversations", map[string]string{
+				"platform": "instagram",
+				"fields":   "id,updated_time,unread_count,participants,messages.limit(1){message,from,created_time}",
+				"limit":    "50",
+			})
+			if err != nil {
+				results[i] = pageResult{limited: err.Error()}
+				return
+			}
+			var convs []gin.H
+			for _, it := range dataList(res) {
+				cm, _ := it.(map[string]any)
+				if cm == nil {
+					continue
+				}
+				// Customer = the participant that is not our own IG account.
+				custName, custID := "", ""
+				if parts, ok := cm["participants"].(map[string]any); ok {
+					for _, pit := range dataList(parts) {
+						pp, _ := pit.(map[string]any)
+						if pp == nil {
+							continue
+						}
+						id := gstr(pp, "id")
+						user := gstr(pp, "username")
+						if id == pg.igID || user == pg.igUser {
+							continue
+						}
+						custID = id
+						custName = user
+						if custName == "" {
+							custName = gstr(pp, "name")
+						}
+					}
+				}
+				// Last message snippet.
+				snippet := ""
+				if msgs, ok := cm["messages"].(map[string]any); ok {
+					if d := dataList(msgs); len(d) > 0 {
+						if m0, ok := d[0].(map[string]any); ok {
+							snippet = gstr(m0, "message")
+						}
+					}
+				}
+				convs = append(convs, gin.H{
+					"id":          gstr(cm, "id"),
+					"pageId":      pg.pageID,
+					"igUser":      pg.igUser,
+					"customer":    custName,
+					"recipientId": custID,
+					"snippet":     snippet,
+					"updatedTime": gstr(cm, "updated_time"),
+					"unread":      gnum(cm, "unread_count"),
+				})
+			}
+			results[i] = pageResult{convs: convs}
+		}(i, pg)
+	}
+	wg.Wait()
+
+	convs := []gin.H{}
+	var limited string
+	for _, r := range results {
+		convs = append(convs, r.convs...)
+		if limited == "" && r.limited != "" {
+			limited = sanitizeIGError(r.limited)
+		}
+	}
+	sort.Slice(convs, func(i, j int) bool {
+		return gstr(convs[i], "updatedTime") > gstr(convs[j], "updatedTime")
+	})
+	out := gin.H{"configured": true, "conversations": convs, "accounts": len(pages)}
+	if len(convs) == 0 && limited != "" {
+		out["limited"] = limited
+	}
+	h.setCache(igKey, out)
+	c.JSON(http.StatusOK, out)
+}
+
+// IGMessages — full message history of one thread. `fromMe` marks our own
+// replies so the UI can render them on the right.
+func (h *MetaHandler) IGMessages(c *gin.Context) {
+	convID := c.Query("conversation_id")
+	pageID := c.Query("page_id")
+	if convID == "" || pageID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "conversation_id & page_id wajib"})
+		return
+	}
+	pg := h.findIGPage(pageID)
+	if pg == nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "page tidak ditemukan / token tidak punya akses"})
+		return
+	}
+	pmc := h.pageClient(pg.pageToken)
+	res, err := pmc.graph("/"+convID, map[string]string{
+		"fields": "messages.limit(80){id,message,from,created_time}",
+	})
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	msgs := []gin.H{}
+	if mm, ok := res["messages"].(map[string]any); ok {
+		for _, it := range dataList(mm) {
+			m, _ := it.(map[string]any)
+			if m == nil {
+				continue
+			}
+			fromID := ""
+			if f, ok := m["from"].(map[string]any); ok {
+				fromID = gstr(f, "id")
+			}
+			msgs = append(msgs, gin.H{
+				"id":      gstr(m, "id"),
+				"text":    gstr(m, "message"),
+				"time":    gstr(m, "created_time"),
+				"fromMe":  fromID == pg.igID,
+				"fromId":  fromID,
+			})
+		}
+	}
+	// Graph returns newest-first; reverse to chronological for chat display.
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	c.JSON(http.StatusOK, gin.H{"messages": msgs, "igUser": pg.igUser})
+}
+
+// IGSend — reply to a thread. Sends to the customer's IGSID via the Page.
+func (h *MetaHandler) IGSend(c *gin.Context) {
+	var req struct {
+		PageID      string `json:"page_id"`
+		RecipientID string `json:"recipient_id"`
+		Text        string `json:"text"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.PageID == "" || req.RecipientID == "" || strings.TrimSpace(req.Text) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "page_id, recipient_id, dan text wajib"})
+		return
+	}
+	pg := h.findIGPage(req.PageID)
+	if pg == nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "page tidak ditemukan / token tidak punya akses"})
+		return
+	}
+	pmc := h.pageClient(pg.pageToken)
+	res, err := pmc.graphPost("/"+pg.pageID+"/messages", map[string]any{
+		"recipient":    map[string]string{"id": req.RecipientID},
+		"message":      map[string]string{"text": req.Text},
+		"messaging_type": "RESPONSE",
+	})
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "result": res})
 }

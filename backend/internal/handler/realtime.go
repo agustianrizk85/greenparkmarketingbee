@@ -24,11 +24,26 @@ type RealtimeHub struct {
 	conns map[*websocket.Conn]bool
 }
 
+// WebSocket keepalive timings. The server pings periodically and expects a pong
+// within pongWait; a missed pong trips the read deadline and reaps the (possibly
+// half-open) connection, so goroutines don't linger and idle proxies don't drop
+// the socket silently.
+const (
+	wsWriteWait  = 5 * time.Second
+	wsPongWait   = 60 * time.Second
+	wsPingPeriod = (wsPongWait * 9) / 10
+)
+
 func NewRealtimeHub() *RealtimeHub { return &RealtimeHub{conns: map[*websocket.Conn]bool{}} }
 
 func (h *RealtimeHub) revision() int64 { return atomic.LoadInt64(&h.rev) }
 
 func (h *RealtimeHub) bump() { h.broadcast(atomic.AddInt64(&h.rev, 1)) }
+
+// Bump pushes a new revision to every connected dashboard. Exported so
+// background jobs (e.g. content-plan auto-sync) can trigger a live refresh
+// without going through an HTTP request.
+func (h *RealtimeHub) Bump() { h.bump() }
 
 func (h *RealtimeHub) broadcast(rev int64) {
 	msg := map[string]int64{"rev": rev}
@@ -82,15 +97,38 @@ func (h *RealtimeHub) ServeWS(tm *middleware.TokenManager) gin.HandlerFunc {
 		}
 		h.add(conn)
 		h.sendTo(conn, h.revision()) // sync immediately on connect
-		go func() {
-			defer h.remove(conn)
-			conn.SetReadLimit(512)
-			for {
-				if _, _, err := conn.ReadMessage(); err != nil {
-					return
-				}
-			}
-		}()
+
+		conn.SetReadLimit(512)
+		_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		})
+		go h.readLoop(conn)
+		go h.pingLoop(conn)
+	}
+}
+
+// readLoop drains inbound frames (there are none of interest) and, crucially,
+// lets the read deadline fire when a pong is missed — reaping dead connections.
+func (h *RealtimeHub) readLoop(conn *websocket.Conn) {
+	defer h.remove(conn)
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+// pingLoop sends periodic pings so half-open connections are detected. WriteControl
+// is safe to call concurrently with the WriteJSON broadcasts.
+func (h *RealtimeHub) pingLoop(conn *websocket.Conn) {
+	t := time.NewTicker(wsPingPeriod)
+	defer t.Stop()
+	for range t.C {
+		if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+			h.remove(conn)
+			return
+		}
 	}
 }
 

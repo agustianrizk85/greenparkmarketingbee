@@ -26,27 +26,37 @@ func (s *WorkItemService) Create(req dto.CreateWorkItemRequest, createdBy uint) 
 		Stage:     model.StageBrief,
 		CreatedBy: createdBy,
 	}
-
-	base := time.Now().UTC()
-	templates := CatalogFor(req.Alur)
-	steps := make([]model.WorkStep, 0, len(templates))
-	for i, t := range templates {
-		step := t.toModel(0, i+1)
-		if step.SLADays > 0 {
-			due := base.AddDate(0, 0, step.SLADays)
-			step.DueDate = &due
-		}
-		steps = append(steps, step)
-	}
-
+	steps := BuildSteps(req.Alur, time.Now().UTC())
 	if err := s.items.CreateWithSteps(item, steps); err != nil {
 		return nil, err
 	}
 	return item, nil
 }
 
+// BuildSteps instantiates the checklist for an alur, anchoring each step's due
+// date to `anchor` + its SLA. The Content Plan sync anchors to the planned upload
+// date so warnings reflect the schedule; manual creation anchors to now.
+func BuildSteps(alur model.Alur, anchor time.Time) []model.WorkStep {
+	templates := CatalogFor(alur)
+	steps := make([]model.WorkStep, 0, len(templates))
+	for i, t := range templates {
+		step := t.toModel(0, i+1)
+		if step.SLADays > 0 && !anchor.IsZero() {
+			due := anchor.AddDate(0, 0, step.SLADays)
+			step.DueDate = &due
+		}
+		steps = append(steps, step)
+	}
+	return steps
+}
+
 func (s *WorkItemService) List() ([]model.WorkItem, error) {
 	return s.items.List()
+}
+
+// DeleteAll wipes every work item, step and document. Accounts are preserved.
+func (s *WorkItemService) DeleteAll() (repository.ResetCounts, error) {
+	return s.items.DeleteAllWorkData()
 }
 
 func (s *WorkItemService) Get(id uint) (*model.WorkItem, error) {

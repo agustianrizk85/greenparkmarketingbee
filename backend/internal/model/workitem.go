@@ -44,5 +44,15 @@ type WorkItem struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
+	// Sync provenance — set when the item is ingested from the Content Plan
+	// spreadsheet. Source is empty for items created manually in the app.
+	Source      string     `gorm:"size:32;index" json:"source,omitempty"`            // e.g. "content-plan"
+	SourceKey   string     `gorm:"size:48;uniqueIndex" json:"source_key,omitempty"`  // idempotency key (project|date|title)
+	SourceTab   string     `gorm:"size:64" json:"source_tab,omitempty"`              // exact sheet tab, e.g. "Copywrite LHL"
+	ContentType string     `gorm:"size:48" json:"content_type,omitempty"`            // raw calendar label (Softsell Instagram, …)
+	PlannedDate *time.Time `json:"planned_date,omitempty"`                           // scheduled upload date from the plan
+	Brief       string     `gorm:"type:text" json:"brief,omitempty"`
+	Caption     string     `gorm:"type:text" json:"caption,omitempty"`
+
 	Steps []WorkStep `gorm:"foreignKey:WorkItemID" json:"steps,omitempty"`
 }

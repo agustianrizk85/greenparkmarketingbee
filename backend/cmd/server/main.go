@@ -13,6 +13,10 @@ import (
 func main() {
 	cfg := config.Load()
 
+	for _, w := range cfg.SecurityWarnings() {
+		log.Printf("[SECURITY WARNING] %s", w)
+	}
+
 	db, err := database.Connect(cfg)
 	if err != nil {
 		log.Fatalf("database connection failed: %v", err)

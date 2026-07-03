@@ -2,3 +2,17 @@
 *.db
 /uploads/
 .env
+
+# compiled binaries
+*.exe
+*.exe~
+server
+
+# runtime logs
+*.log
+*.err
+*.out
+
+# google service-account credentials — never commit
+google-credentials.json
+*credentials*.json

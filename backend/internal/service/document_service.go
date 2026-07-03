@@ -56,3 +56,25 @@ func (s *DocumentService) Upload(fh *multipart.FileHeader, p UploadParams, save 
 func (s *DocumentService) Get(id uint) (*model.Document, error) {
 	return s.docs.FindByID(id)
 }
+
+// PurgeAll removes every stored upload (the per-work-item subdirectories),
+// leaving the upload root in place. Called by the "delete all data" reset after
+// the document rows are gone, so no orphan files linger.
+func (s *DocumentService) PurgeAll() error {
+	entries, err := os.ReadDir(s.uploadDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == ".gitkeep" {
+			continue
+		}
+		if err := os.RemoveAll(s.uploadDir + "/" + e.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}

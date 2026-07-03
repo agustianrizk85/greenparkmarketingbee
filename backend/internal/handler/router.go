@@ -1,11 +1,15 @@
 package handler
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"time"
 
 	"marketingflow/internal/config"
+	"marketingflow/internal/gsheets"
 	"marketingflow/internal/middleware"
+	"marketingflow/internal/model"
 	"marketingflow/internal/repository"
 	"marketingflow/internal/service"
 
@@ -21,6 +25,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	itemRepo := repository.NewWorkItemRepository(db)
 	stepRepo := repository.NewStepRepository(db)
 	docRepo := repository.NewDocumentRepository(db)
+	metaRepo := repository.NewMetaRepository(db)
 
 	// Infrastructure
 	tokenMgr := middleware.NewTokenManager(cfg.JWTSecret, cfg.JWTExpiryHours)
@@ -31,19 +36,31 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	stepSvc := service.NewStepService(stepRepo, itemSvc)
 	docSvc := service.NewDocumentService(docRepo, cfg.UploadDir)
 	dashboardSvc := service.NewDashboardService(stepRepo)
+	contentPlanSvc := service.NewContentPlanService(itemRepo)
+
+	// Google Sheets client for the Content Plan sync (nil → public XLSX export).
+	sheetsClient, err := gsheets.New(cfg.GoogleCredentials)
+	if err != nil {
+		log.Printf("content-plan: kredensial Google diabaikan: %v", err)
+	}
 
 	// Handlers
 	authH := NewAuthHandler(authSvc)
-	itemH := NewWorkItemHandler(itemSvc)
+	itemH := NewWorkItemHandler(itemSvc, docSvc)
 	stepH := NewStepHandler(stepSvc, docSvc)
 	dashboardH := NewDashboardHandler(dashboardSvc)
-	metaH := NewMetaHandler(cfg.MetaToken, cfg.MetaAPIVersion, cfg.MetaBusinessID, cfg.MetaAdAccount)
+	metaH := NewMetaHandler(metaRepo, cfg.MetaToken, cfg.MetaAPIVersion, cfg.MetaBusinessID, cfg.MetaAdAccount)
+	metaOAuthH := NewMetaOAuthHandler(metaRepo, tokenMgr, cfg)
+
+	hub := NewRealtimeHub()
+	contentPlanH := NewContentPlanHandler(contentPlanSvc, sheetsClient, cfg.ContentSheetID, hub)
+	contentPlanH.StartAutoSync(context.Background())
 
 	r := gin.Default()
 	r.MaxMultipartMemory = 32 << 20 // 32 MiB
 
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:5174", "http://localhost:5177", "http://localhost:3000"},
+		AllowOrigins:     cfg.CORSOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
 		AllowCredentials: true,
@@ -52,13 +69,17 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 
-	hub := NewRealtimeHub()
-
 	api := r.Group("/api")
 	{
 		api.POST("/auth/login", authH.Login)
 		// Realtime push: validates its own ?token= (browsers can't set WS headers).
 		api.GET("/ws", hub.ServeWS(tokenMgr))
+
+		// Meta OAuth (Facebook Login) entry + callback are top-level navigations
+		// (popup / Facebook redirect) so they can't carry a bearer header:
+		// Login validates its own ?token=, Callback is validated by signed state.
+		api.GET("/meta/oauth/login", metaOAuthH.Login)
+		api.GET("/meta/oauth/callback", metaOAuthH.Callback)
 
 		authed := api.Group("")
 		authed.Use(middleware.Auth(tokenMgr))
@@ -76,8 +97,17 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			// Work items & steps (Alur A–D).
 			authed.GET("/work-items", itemH.List)
 			authed.POST("/work-items", itemH.Create)
+			// Destructive: wipe all work data (keeps accounts). Kadep only.
+			authed.POST("/work-items/reset", middleware.RequireRole(model.RoleKadep), itemH.Reset)
 			authed.GET("/work-items/:id", itemH.Get)
 			authed.GET("/work-items/:id/progress", itemH.Progress)
+
+			// Content Plan sync (Google Sheets → work items) + background auto-sync.
+			authed.GET("/content-plan/source", contentPlanH.Source)
+			authed.POST("/content-plan/sync/preview", contentPlanH.Preview)
+			authed.POST("/content-plan/sync/approve", contentPlanH.Approve)
+			authed.GET("/content-plan/auto", contentPlanH.AutoStatus)
+			authed.POST("/content-plan/auto", contentPlanH.AutoSet)
 
 			authed.GET("/my-steps", stepH.Mine)
 			authed.GET("/steps/:id", stepH.Get)
@@ -91,8 +121,21 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			// Meta (Facebook) live data — Ads / WhatsApp / Instagram tabs.
 			authed.GET("/meta/ads", metaH.Ads)
 			authed.GET("/meta/ads/detail", metaH.AdsDetail)
+			authed.GET("/meta/ads/campaign", metaH.AdsCampaign)
 			authed.GET("/meta/whatsapp", metaH.WhatsApp)
 			authed.GET("/meta/instagram", metaH.Instagram)
+			authed.GET("/meta/instagram/conversations", metaH.IGConversations)
+			authed.GET("/meta/instagram/messages", metaH.IGMessages)
+			authed.POST("/meta/instagram/send", metaH.IGSend)
+
+			// Meta OAuth app config + connected-account management (multi-account).
+			authed.GET("/meta/oauth/config", metaOAuthH.Config)
+			authed.PUT("/meta/oauth/config", metaOAuthH.SaveConfig)
+			authed.POST("/meta/connections/manual", metaOAuthH.ConnectManual)
+			authed.GET("/meta/connections", metaOAuthH.ListConnections)
+			authed.PATCH("/meta/connections/:id", metaOAuthH.UpdateConnection)
+			authed.POST("/meta/connections/:id/activate", metaOAuthH.Activate)
+			authed.DELETE("/meta/connections/:id", metaOAuthH.Disconnect)
 		}
 	}
 
