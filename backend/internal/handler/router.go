@@ -4,8 +4,10 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
+	"marketingflow/internal/authmw"
 	"marketingflow/internal/config"
 	"marketingflow/internal/gsheets"
 	"marketingflow/internal/middleware"
@@ -29,6 +31,9 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 	// Infrastructure
 	tokenMgr := middleware.NewTokenManager(cfg.JWTSecret, cfg.JWTExpiryHours)
+	// Accept the unified dashboard's Ed25519 SSO login token (one login, no
+	// bridge) when AUTH_JWKS_URL is set; native marketing JWT still works.
+	ssoV := authmw.New(authmw.Options{JWKSURL: os.Getenv("AUTH_JWKS_URL"), Issuer: os.Getenv("AUTH_ISSUER")})
 
 	// Services
 	authSvc := service.NewAuthService(userRepo, tokenMgr)
@@ -73,7 +78,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	{
 		api.POST("/auth/login", authH.Login)
 		// Realtime push: validates its own ?token= (browsers can't set WS headers).
-		api.GET("/ws", hub.ServeWS(tokenMgr))
+		api.GET("/ws", hub.ServeWS(tokenMgr, ssoV))
 
 		// Meta OAuth (Facebook Login) entry + callback are top-level navigations
 		// (popup / Facebook redirect) so they can't carry a bearer header:
@@ -82,7 +87,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		api.GET("/meta/oauth/callback", metaOAuthH.Callback)
 
 		authed := api.Group("")
-		authed.Use(middleware.Auth(tokenMgr))
+		authed.Use(middleware.Auth(tokenMgr, ssoV))
 		// Bump the realtime revision on every successful write so all connected
 		// dashboards refresh instantly.
 		authed.Use(hub.BumpMiddleware())

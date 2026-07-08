@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"marketingflow/internal/authmw"
 	"marketingflow/internal/middleware"
 
 	"github.com/gin-gonic/gin"
@@ -85,11 +86,14 @@ var wsUpgrader = websocket.Upgrader{
 // ServeWS upgrades the request to a WebSocket. Browsers cannot send the
 // Authorization header on a WS handshake, so the bearer token is passed as a
 // query parameter and validated with the token manager.
-func (h *RealtimeHub) ServeWS(tm *middleware.TokenManager) gin.HandlerFunc {
+func (h *RealtimeHub) ServeWS(tm *middleware.TokenManager, sso *authmw.Verifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if _, err := tm.Parse(c.Query("token")); err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-			return
+		tok := c.Query("token")
+		if _, err := tm.Parse(tok); err != nil {
+			if _, _, ok := middleware.SSOIdentity(sso, tok); !ok {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+				return
+			}
 		}
 		conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {

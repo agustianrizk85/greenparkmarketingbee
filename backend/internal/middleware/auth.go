@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"marketingflow/internal/authmw"
 	"marketingflow/internal/model"
 
 	"github.com/gin-gonic/gin"
@@ -16,7 +17,9 @@ const (
 )
 
 // Auth validates the Bearer token and stores the identity in the gin context.
-func Auth(tm *TokenManager) gin.HandlerFunc {
+// Accepts the native marketing JWT OR (when sso != nil) the unified dashboard's
+// Ed25519 SSO login token — so the dashboard can call us with ONE login.
+func Auth(tm *TokenManager, sso *authmw.Verifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" || !strings.HasPrefix(header, "Bearer ") {
@@ -24,16 +27,43 @@ func Auth(tm *TokenManager) gin.HandlerFunc {
 			return
 		}
 		raw := strings.TrimPrefix(header, "Bearer ")
-		claims, err := tm.Parse(raw)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+		if claims, err := tm.Parse(raw); err == nil {
+			c.Set(ctxUserID, claims.UserID)
+			c.Set(ctxRole, claims.Role)
+			c.Set(ctxEmail, claims.Email)
+			c.Next()
 			return
 		}
-		c.Set(ctxUserID, claims.UserID)
-		c.Set(ctxRole, claims.Role)
-		c.Set(ctxEmail, claims.Email)
-		c.Next()
+		if role, email, ok := SSOIdentity(sso, raw); ok {
+			c.Set(ctxUserID, uint(0)) // SSO user has no native marketing id
+			c.Set(ctxRole, role)
+			c.Set(ctxEmail, email)
+			c.Next()
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 	}
+}
+
+// SSOIdentity verifies a unified dashboard SSO token for the marketing
+// department and returns the mapped role + email. Super users map to kadep.
+func SSOIdentity(sso *authmw.Verifier, raw string) (model.Role, string, bool) {
+	if sso == nil {
+		return "", "", false
+	}
+	cl, err := sso.Verify(raw)
+	if err != nil || !cl.CanAccess("marketing") {
+		return "", "", false
+	}
+	role := model.Role(cl.Role("marketing"))
+	if role == "" || cl.Super {
+		role = model.RoleKadep
+	}
+	email := cl.Email
+	if email == "" {
+		email = cl.Username
+	}
+	return role, email, true
 }
 
 // RequireRole restricts a route to the given roles.
