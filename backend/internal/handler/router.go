@@ -57,6 +57,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	metaH := NewMetaHandler(metaRepo, cfg.MetaToken, cfg.MetaAPIVersion, cfg.MetaBusinessID, cfg.MetaAdAccount)
 	metaOAuthH := NewMetaOAuthHandler(metaRepo, tokenMgr, cfg)
 	linkH := NewProjectLinkHandler(db)
+	komentarH := NewStepCommentHandler(db)
 
 	hub := NewRealtimeHub()
 	contentPlanH := NewContentPlanHandler(contentPlanSvc, sheetsClient, cfg.ContentSheetID, hub)
@@ -107,6 +108,8 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			authed.POST("/work-items/reset", middleware.RequireRole(model.RoleKadep), itemH.Reset)
 			authed.GET("/work-items/:id", itemH.Get)
 			authed.GET("/work-items/:id/progress", itemH.Progress)
+			// Seluruh komentar semua langkah satu konten dalam SATU permintaan.
+			authed.GET("/work-items/:id/comments", komentarH.ListByItem)
 
 			// Tautan proyek konten -> proyek Perencanaan (projectlink_handler.go):
 			// kunci sambungan lintas divisi. Siapa pun kecuali viewer.
@@ -124,6 +127,9 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			authed.GET("/steps/:id", stepH.Get)
 			authed.PUT("/steps/:id", stepH.Update)
 			authed.POST("/steps/:id/documents", stepH.UploadDocument)
+			// Percakapan antar tim pada satu langkah (stepcomment_handler.go).
+			authed.GET("/steps/:id/comments", komentarH.List)
+			authed.POST("/steps/:id/comments", komentarH.Create)
 			authed.GET("/documents/:id/download", stepH.DownloadDocument)
 
 			// Dashboard: early warning feed.

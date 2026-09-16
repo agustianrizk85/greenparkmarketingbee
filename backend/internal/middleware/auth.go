@@ -90,6 +90,17 @@ func CurrentUserID(c *gin.Context) uint {
 	return 0
 }
 
+// CurrentEmail returns the authenticated identity (email, or username for SSO
+// accounts without one) — "" when absent. Dipakai sebagai penulis komentar.
+func CurrentEmail(c *gin.Context) string {
+	if v, ok := c.Get(ctxEmail); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 // CurrentRole returns the authenticated role from the context.
 func CurrentRole(c *gin.Context) model.Role {
 	if v, ok := c.Get(ctxRole); ok {

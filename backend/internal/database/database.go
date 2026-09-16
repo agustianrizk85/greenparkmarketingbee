@@ -47,6 +47,8 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 		&model.MetaConnection{},
 		// Tautan proyek konten -> proyek Perencanaan (sambungan lintas divisi).
 		&model.ProjectLink{},
+		// Percakapan antar tim pada satu langkah alur konten.
+		&model.StepComment{},
 	); err != nil {
 		return nil, err
 	}
