@@ -56,6 +56,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	dashboardH := NewDashboardHandler(dashboardSvc)
 	metaH := NewMetaHandler(metaRepo, cfg.MetaToken, cfg.MetaAPIVersion, cfg.MetaBusinessID, cfg.MetaAdAccount)
 	metaOAuthH := NewMetaOAuthHandler(metaRepo, tokenMgr, cfg)
+	linkH := NewProjectLinkHandler(db)
 
 	hub := NewRealtimeHub()
 	contentPlanH := NewContentPlanHandler(contentPlanSvc, sheetsClient, cfg.ContentSheetID, hub)
@@ -106,6 +107,11 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			authed.POST("/work-items/reset", middleware.RequireRole(model.RoleKadep), itemH.Reset)
 			authed.GET("/work-items/:id", itemH.Get)
 			authed.GET("/work-items/:id/progress", itemH.Progress)
+
+			// Tautan proyek konten -> proyek Perencanaan (projectlink_handler.go):
+			// kunci sambungan lintas divisi. Siapa pun kecuali viewer.
+			authed.GET("/project-links", linkH.List)
+			authed.PUT("/project-links/:name", linkH.Put)
 
 			// Content Plan sync (Google Sheets → work items) + background auto-sync.
 			authed.GET("/content-plan/source", contentPlanH.Source)
