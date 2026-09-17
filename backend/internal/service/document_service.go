@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"os"
+	"strings"
 
 	"marketingflow/internal/model"
 	"marketingflow/internal/repository"
@@ -60,6 +61,25 @@ func (s *DocumentService) Get(id uint) (*model.Document, error) {
 // PurgeAll removes every stored upload (the per-work-item subdirectories),
 // leaving the upload root in place. Called by the "delete all data" reset after
 // the document rows are gone, so no orphan files linger.
+// PurgeFiles menghapus berkas lampiran tertentu dari disk. Berkas yang memang
+// sudah tidak ada dianggap beres — tujuannya "tidak ada sisa", bukan "berhasil
+// menghapus".
+func (s *DocumentService) PurgeFiles(paths []string) error {
+	var gagal []string
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			gagal = append(gagal, p)
+		}
+	}
+	if len(gagal) > 0 {
+		return fmt.Errorf("%d berkas gagal dihapus", len(gagal))
+	}
+	return nil
+}
+
 func (s *DocumentService) PurgeAll() error {
 	entries, err := os.ReadDir(s.uploadDir)
 	if err != nil {

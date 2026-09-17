@@ -21,6 +21,10 @@ type StepTemplate struct {
 	MetadataKeys      []string // structured link fields the UI should collect
 }
 
+// FaseReview — nama fase "Review & Revisi" seperti tersimpan di WorkStep.Phase.
+// Dipakai penjagaan hak, jadi ia tidak boleh ditulis ulang sebagai teks lepas.
+const FaseReview = "review"
+
 // Owner (PIC) labels — the internal Marketing team + the Kepala Departemen.
 const (
 	OwnerCopywriter = "Copywriter"

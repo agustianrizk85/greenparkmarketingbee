@@ -46,6 +46,14 @@ func (r *UserRepository) Create(u *model.User) error {
 	return r.db.Create(u).Error
 }
 
+// List mengembalikan seluruh akun, diurutkan supaya pemilih tujuan Pre-Brief
+// tampil stabil: kepala departemen dulu, lalu menurut nama.
+func (r *UserRepository) List() ([]model.User, error) {
+	var out []model.User
+	err := r.db.Order("CASE WHEN role = 'kadep' THEN 0 ELSE 1 END, name").Find(&out).Error
+	return out, err
+}
+
 func (r *UserRepository) Count() (int64, error) {
 	var n int64
 	err := r.db.Model(&model.User{}).Count(&n).Error

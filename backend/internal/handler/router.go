@@ -42,6 +42,9 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	docSvc := service.NewDocumentService(docRepo, cfg.UploadDir)
 	dashboardSvc := service.NewDashboardService(stepRepo)
 	contentPlanSvc := service.NewContentPlanService(itemRepo)
+	// Posisi pemakai (Copywriter, Design Grafis, …) tidak ada di token, jadi
+	// keputusan hak yang bergantung padanya dilayani service ini.
+	aksesSvc := service.NewAksesService(userRepo)
 
 	// Google Sheets client for the Content Plan sync (nil → public XLSX export).
 	sheetsClient, err := gsheets.New(cfg.GoogleCredentials)
@@ -51,8 +54,8 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 	// Handlers
 	authH := NewAuthHandler(authSvc)
-	itemH := NewWorkItemHandler(itemSvc, docSvc)
-	stepH := NewStepHandler(stepSvc, docSvc)
+	itemH := NewWorkItemHandler(itemSvc, docSvc, aksesSvc)
+	stepH := NewStepHandler(stepSvc, docSvc, aksesSvc)
 	dashboardH := NewDashboardHandler(dashboardSvc)
 	metaH := NewMetaHandler(metaRepo, cfg.MetaToken, cfg.MetaAPIVersion, cfg.MetaBusinessID, cfg.MetaAdAccount)
 	metaOAuthH := NewMetaOAuthHandler(metaRepo, tokenMgr, cfg)
@@ -96,6 +99,21 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		{
 			authed.GET("/auth/me", authH.Me)
 
+			// Katalog LANGKAH per alur — sumber kolom papan Konten. Dibaca dari
+			// katalog yang sama dengan yang menyemai ceklis, jadi kolom papan
+			// tidak akan pernah menyimpang dari langkah yang benar-benar dibuat.
+			authed.GET("/meta/langkah", func(c *gin.Context) {
+				alur := model.Alur(c.Query("alur"))
+				out := make([]gin.H, 0)
+				for i, t := range service.CatalogFor(alur) {
+					out = append(out, gin.H{
+						"code": t.Code, "name": t.Name, "phase": t.Phase,
+						"owner": t.Owner, "sequence": i + 1,
+					})
+				}
+				c.JSON(http.StatusOK, gin.H{"steps": out})
+			})
+
 			// Reference metadata (alur labels) for the UI.
 			authed.GET("/meta/alur", func(c *gin.Context) {
 				c.JSON(http.StatusOK, service.AlurLabels)
@@ -103,9 +121,25 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 			// Work items & steps (Alur A–D).
 			authed.GET("/work-items", itemH.List)
-			authed.POST("/work-items", itemH.Create)
+			// Membuat konten = membuka pekerjaan baru untuk satu tim, jadi
+			// haknya di kepala departemen. Menyembunyikan tombolnya saja tidak
+			// cukup: siapa pun yang punya token masih bisa memanggil rutenya.
+			authed.POST("/work-items", middleware.RequireRole(model.RoleKadep), itemH.Create)
+			// Pre-Brief: kadep & Copywriter membuka pekerjaan untuk beberapa
+			// orang sekaligus. Haknya dinilai di handler karena syaratnya
+			// menyangkut POSISI, bukan hanya peran.
+			authed.POST("/work-items/pre-brief", itemH.PreBrief)
+			// Daftar akun untuk pemilih tujuan Pre-Brief (nama & posisi saja).
+			authed.GET("/users", itemH.Akun)
 			// Destructive: wipe all work data (keeps accounts). Kadep only.
 			authed.POST("/work-items/reset", middleware.RequireRole(model.RoleKadep), itemH.Reset)
+			// Hapus SATU konten. Izinnya dinilai di service (pembuat / kadep),
+			// bukan di rute, supaya pesan penolakannya bisa menyebut alasannya.
+			authed.DELETE("/work-items/:id", itemH.Delete)
+			// Catatan kartu (isi brief) — penerima, pembuat, atau kadep.
+			authed.PATCH("/work-items/:id/brief", itemH.UpdateBrief)
+			// Pindah kolom. Kolom Review & Revisi dijaga Copywriter/kadep.
+			authed.PATCH("/work-items/:id/stage", itemH.Pindahkan)
 			authed.GET("/work-items/:id", itemH.Get)
 			authed.GET("/work-items/:id/progress", itemH.Progress)
 			// Seluruh komentar semua langkah satu konten dalam SATU permintaan.
@@ -119,7 +153,9 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			// Content Plan sync (Google Sheets → work items) + background auto-sync.
 			authed.GET("/content-plan/source", contentPlanH.Source)
 			authed.POST("/content-plan/sync/preview", contentPlanH.Preview)
-			authed.POST("/content-plan/sync/approve", contentPlanH.Approve)
+			// Menyetujui sinkron = menuangkan puluhan konten sekaligus ke papan;
+			// haknya sama dengan membuat konten satu per satu.
+			authed.POST("/content-plan/sync/approve", middleware.RequireRole(model.RoleKadep), contentPlanH.Approve)
 			authed.GET("/content-plan/auto", contentPlanH.AutoStatus)
 			authed.POST("/content-plan/auto", contentPlanH.AutoSet)
 

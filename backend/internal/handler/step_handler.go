@@ -15,10 +15,11 @@ import (
 type StepHandler struct {
 	steps *service.StepService
 	docs  *service.DocumentService
+	akses AksesPosisi
 }
 
-func NewStepHandler(steps *service.StepService, docs *service.DocumentService) *StepHandler {
-	return &StepHandler{steps: steps, docs: docs}
+func NewStepHandler(steps *service.StepService, docs *service.DocumentService, akses AksesPosisi) *StepHandler {
+	return &StepHandler{steps: steps, docs: docs, akses: akses}
 }
 
 func (h *StepHandler) Get(c *gin.Context) {
@@ -59,10 +60,13 @@ func (h *StepHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	step, err := h.steps.Update(id, req, middleware.CurrentUserID(c), middleware.CurrentRole(c))
+	step, err := h.steps.Update(id, req, middleware.CurrentUserID(c), middleware.CurrentRole(c),
+		h.akses.Posisi(middleware.CurrentUserID(c), middleware.CurrentEmail(c)))
 	switch {
 	case errors.Is(err, repository.ErrNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "step not found"})
+	case errors.Is(err, service.ErrReviewRole):
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 	case errors.Is(err, service.ErrBudgetRequired), errors.Is(err, service.ErrApprovalRole):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	case err != nil:

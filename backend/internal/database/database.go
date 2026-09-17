@@ -52,5 +52,16 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 	); err != nil {
 		return nil, err
 	}
+
+	// Perbaikan sekali-jalan untuk data lama: sebelum SourceKey jadi nullable,
+	// item manual disimpan dengan kunci "" dan hanya SATU yang bisa masuk.
+	// Tanpa baris ini, basis data lama tetap menolak item manual berikutnya
+	// walau kodenya sudah benar. Aman diulang: setelah kosong, tidak ada lagi
+	// baris yang cocok.
+	if err := db.Model(&model.WorkItem{}).
+		Where("source_key = ?", "").
+		Update("source_key", nil).Error; err != nil {
+		return nil, err
+	}
 	return db, nil
 }

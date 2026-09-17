@@ -101,6 +101,9 @@ func (s *ContentPlanService) Approve(tabs map[string][][]string, by uint) (*Appr
 			continue
 		}
 
+		// Salinan lokal: alamatnya ikut tersimpan di baris ini, jadi ia tidak
+		// boleh menunjuk variabel yang dipakai ulang perulangan berikutnya.
+		kunci := p.SourceKey
 		anchor := time.Now().UTC()
 		if p.Date != nil {
 			anchor = *p.Date
@@ -112,7 +115,7 @@ func (s *ContentPlanService) Approve(tabs map[string][][]string, by uint) (*Appr
 			Stage:       model.StageBrief,
 			CreatedBy:   by,
 			Source:      SourceContentPlan,
-			SourceKey:   p.SourceKey,
+			SourceKey:   &kunci,
 			SourceTab:   p.SourceTab,
 			ContentType: p.ContentType,
 			PlannedDate: p.Date,

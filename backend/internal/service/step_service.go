@@ -15,6 +15,9 @@ import (
 var (
 	ErrBudgetRequired = errors.New("nominal budget wajib diisi sebelum step ini diselesaikan")
 	ErrApprovalRole   = errors.New("hanya Kepala Departemen Marketing yang dapat menyelesaikan step approval")
+	// Review & Revisi adalah tempat karya dinilai, bukan dikerjakan: yang menilai
+	// hanya Copywriter (pemilik naskahnya) dan Kepala Departemen.
+	ErrReviewRole = errors.New("hanya Copywriter dan Kepala Departemen Marketing yang dapat mengubah langkah di tahap Review & Revisi")
 )
 
 type StepService struct {
@@ -40,10 +43,15 @@ func (s *StepService) Mine(position string) ([]repository.MineStep, error) {
 
 // Update applies a partial update and enforces the flowchart's completion rules,
 // then recomputes the parent work item stage.
-func (s *StepService) Update(id uint, req dto.UpdateStepRequest, actor uint, role model.Role) (*model.WorkStep, error) {
+func (s *StepService) Update(id uint, req dto.UpdateStepRequest, actor uint, role model.Role, posisi string) (*model.WorkStep, error) {
 	step, err := s.steps.FindByID(id)
 	if err != nil {
 		return nil, err
+	}
+	// Penjagaan menutup SELURUH penyuntingan langkah review, bukan cuma
+	// statusnya: catatan revisi dan tenggatnya pun bagian dari penilaian.
+	if step.Phase == FaseReview && role != model.RoleKadep && posisi != OwnerCopywriter {
+		return nil, ErrReviewRole
 	}
 
 	if req.BudgetAmount != nil {

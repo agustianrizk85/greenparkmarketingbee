@@ -16,6 +16,35 @@ func NewStepRepository(db *gorm.DB) *StepRepository {
 	return &StepRepository{db: db}
 }
 
+// LangkahBerjalan memulangkan langkah pertama yang BELUM selesai untuk setiap
+// konten — dipakai papan untuk menaruh kartu di kolom langkahnya.
+//
+// Satu query untuk semua konten, bukan satu per kartu: papan menampilkan
+// puluhan kartu sekaligus, dan menanyakannya satu per satu membuat pembukaan
+// papan mengirim puluhan permintaan.
+func (r *StepRepository) LangkahBerjalan() (map[uint][2]string, error) {
+	var rows []struct {
+		WorkItemID uint
+		Code       string
+		Name       string
+	}
+	if err := r.db.Table("work_steps").
+		Select("work_item_id, code, name").
+		Where("status <> ?", "done").
+		Order("work_item_id asc, sequence asc").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[uint][2]string, len(rows))
+	for _, x := range rows {
+		// Baris pertama per konten = langkah berjalan (sudah terurut sequence).
+		if _, ada := out[x.WorkItemID]; !ada {
+			out[x.WorkItemID] = [2]string{x.Code, x.Name}
+		}
+	}
+	return out, nil
+}
+
 func (r *StepRepository) FindByID(id uint) (*model.WorkStep, error) {
 	var s model.WorkStep
 	err := r.db.Preload("Documents").First(&s, id).Error

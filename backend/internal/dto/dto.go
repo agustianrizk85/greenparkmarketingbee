@@ -27,6 +27,38 @@ type CreateWorkItemRequest struct {
 	Project string     `json:"project"`
 }
 
+// PreBriefRequest membuka pekerjaan baru untuk BEBERAPA orang sekaligus: satu
+// konten dibuat per penerima, masing-masing dengan ceklis alurnya sendiri.
+// Dipisah dari CreateWorkItemRequest karena artinya memang berbeda — yang ini
+// menugaskan, yang itu hanya mencatat.
+type PreBriefRequest struct {
+	Title   string     `json:"title" binding:"required"`
+	Alur    model.Alur `json:"alur" binding:"required,oneof=A B C D"`
+	Project string     `json:"project"`
+	// Brief umum: dipakai untuk penerima yang tidak diberi brief sendiri.
+	// Boleh kosong bila semuanya diisi satu per satu.
+	Brief     string           `json:"brief"`
+	Assignees []PreBriefTujuan `json:"assignees" binding:"required,min=1"`
+}
+
+// UpdateStageRequest — memindahkan kartu ke kolom lain.
+type UpdateStageRequest struct {
+	Stage model.WorkStage `json:"stage" binding:"required"`
+}
+
+// UpdateBriefRequest — menyunting CATATAN kartu konten.
+type UpdateBriefRequest struct {
+	Brief string `json:"brief"`
+}
+
+// PreBriefTujuan — satu penerima beserta briefnya sendiri. Brief menempel pada
+// PENERIMA, bukan pada kirimannya: Copywriter dan Design Grafis mengerjakan hal
+// yang berbeda dari campaign yang sama, jadi arahannya memang berbeda.
+type PreBriefTujuan struct {
+	UserID uint   `json:"user_id" binding:"required"`
+	Brief  string `json:"brief"`
+}
+
 // --- Step ---
 
 // UpdateStepRequest carries partial updates. Pointer fields allow distinguishing

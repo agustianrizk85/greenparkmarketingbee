@@ -95,6 +95,67 @@ func (r *WorkItemRepository) DeleteAllWorkData() (ResetCounts, error) {
 	return counts, err
 }
 
+// PindahkanKartu menyimpan kolom kartu. Dipisah dari UpdateStage yang dipakai
+// RecomputeStage supaya niatnya terbaca: yang ini perpindahan oleh ORANG.
+func (r *WorkItemRepository) PindahkanKartu(id uint, stage model.WorkStage) error {
+	return r.db.Model(&model.WorkItem{}).Where("id = ?", id).Update("stage", stage).Error
+}
+
+// UpdateBrief menyimpan CATATAN kartu (isi brief). Hanya kolom itu yang
+// disentuh: judul, alur, dan tahapnya punya jalurnya sendiri, dan menyimpan
+// seluruh baris di sini berarti menimpa perubahan orang lain yang kebetulan
+// menggeser kartunya pada saat yang sama.
+func (r *WorkItemRepository) UpdateBrief(id uint, brief string) error {
+	return r.db.Model(&model.WorkItem{}).Where("id = ?", id).Update("brief", brief).Error
+}
+
+// DeleteItem menghapus SATU konten beserta seluruh anaknya dalam satu
+// transaksi, dan mengembalikan path berkas lampirannya supaya pemanggil bisa
+// membersihkan disk setelah barisnya benar-benar hilang.
+//
+// Urutannya anak dulu: komentar langkah -> dokumen -> langkah -> kontennya.
+// Komentar menempel pada LANGKAH (bukan konten), jadi ia harus dihapus lewat
+// daftar id langkah — tanpa itu ia jadi yatim dan ikut terbaca di utas langkah
+// milik konten lain yang kebetulan memakai ulang id yang sama.
+func (r *WorkItemRepository) DeleteItem(id uint) (ResetCounts, []string, error) {
+	var counts ResetCounts
+	var berkas []string
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var stepIDs []uint
+		if err := tx.Model(&model.WorkStep{}).Where("work_item_id = ?", id).Pluck("id", &stepIDs).Error; err != nil {
+			return err
+		}
+		if len(stepIDs) > 0 {
+			if err := tx.Where("step_id IN ?", stepIDs).Delete(&model.StepComment{}).Error; err != nil {
+				return err
+			}
+		}
+
+		if err := tx.Model(&model.Document{}).Where("work_item_id = ?", id).Pluck("path", &berkas).Error; err != nil {
+			return err
+		}
+		res := tx.Where("work_item_id = ?", id).Delete(&model.Document{})
+		if res.Error != nil {
+			return res.Error
+		}
+		counts.Documents = res.RowsAffected
+
+		res = tx.Where("work_item_id = ?", id).Delete(&model.WorkStep{})
+		if res.Error != nil {
+			return res.Error
+		}
+		counts.WorkSteps = res.RowsAffected
+
+		res = tx.Where("id = ?", id).Delete(&model.WorkItem{})
+		if res.Error != nil {
+			return res.Error
+		}
+		counts.WorkItems = res.RowsAffected
+		return nil
+	})
+	return counts, berkas, err
+}
+
 // UpdateSyncedMeta refreshes the descriptive fields of an already-imported item
 // (keyed by source key) so a re-sync reflects edits made in the sheet — without
 // touching its checklist steps, stage or progress. Alur is intentionally NOT
