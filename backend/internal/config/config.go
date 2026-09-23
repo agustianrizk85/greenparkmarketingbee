@@ -56,6 +56,19 @@ type Config struct {
 	// sheet is read via its public XLSX export (must be link-viewable).
 	ContentSheetID    string // source spreadsheet id ("Content Plan GP 2026")
 	GoogleCredentials []byte // optional service-account JSON for private sheets
+
+	// War Room. Angka iklannya dibaca dari metaapi, jadi yang disimpan di sini
+	// hanya alamatnya plus ambang penilaian.
+	//
+	// Ambangnya env, bukan konstanta: target biaya per hasil adalah keputusan
+	// bisnis yang berubah tiap kampanye besar, dan mengubahnya tidak boleh
+	// menuntut pemasangan ulang.
+	MetaAPIBase                string
+	WarRoomRentang             string // rentang data iklan: 7d | 30d | 90d …
+	WarRoomTargetBiayaPerHasil float64
+	WarRoomFrekuensiMaks       float64
+	WarRoomCTRMinPersen        float64
+	WarRoomJamBalasLead        float64
 }
 
 // defaultContentSheetID is the "Content Plan GP 2026" spreadsheet.
@@ -87,7 +100,8 @@ func Load() *Config {
 			"http://localhost:5177", "http://localhost:3000",
 		}),
 
-		UploadDir: getEnv("UPLOAD_DIR", "./uploads"),
+		// Gudang berkas bersama semua divisi — lihat filedir.go.
+		UploadDir: getEnv("UPLOAD_DIR", GPFileDir("marketing")),
 
 		SeedKadepPassword:  getEnv("SEED_KADEP_PASSWORD", "kadep123"),
 		SeedStaffPassword:  getEnv("SEED_STAFF_PASSWORD", "staff123"),
@@ -105,6 +119,13 @@ func Load() *Config {
 
 		ContentSheetID:    getEnv("CONTENT_SHEET_ID", defaultContentSheetID),
 		GoogleCredentials: loadGoogleCredentials(),
+
+		MetaAPIBase:                getEnv("META_API_BASE", "http://localhost:8097"),
+		WarRoomRentang:             getEnv("WARROOM_RENTANG", "30d"),
+		WarRoomTargetBiayaPerHasil: getEnvFloat("WARROOM_TARGET_BIAYA_PER_HASIL", 150000),
+		WarRoomFrekuensiMaks:       getEnvFloat("WARROOM_FREKUENSI_MAKS", 3),
+		WarRoomCTRMinPersen:        getEnvFloat("WARROOM_CTR_MIN_PERSEN", 1),
+		WarRoomJamBalasLead:        getEnvFloat("WARROOM_JAM_BALAS_LEAD", 2),
 	}
 }
 
@@ -193,6 +214,19 @@ func getEnvInt(key string, fallback int) int {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+// getEnvFloat membaca ambang war room. Nilai yang tidak terbaca JATUH KE
+// fallback alih-alih nol: ambang nol akan menilai setiap kampanye boros, dan
+// salah ketik satu huruf di env tidak boleh berakhir sebagai perintah
+// menghentikan seluruh iklan.
+func getEnvFloat(key string, fallback float64) float64 {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f > 0 {
+			return f
 		}
 	}
 	return fallback
