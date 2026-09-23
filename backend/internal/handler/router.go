@@ -28,6 +28,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	stepRepo := repository.NewStepRepository(db)
 	docRepo := repository.NewDocumentRepository(db)
 	metaRepo := repository.NewMetaRepository(db)
+	warroomRepo := repository.NewWarroomRepository(db)
 
 	// Infrastructure
 	tokenMgr := middleware.NewTokenManager(cfg.JWTSecret, cfg.JWTExpiryHours)
@@ -46,6 +47,25 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	// keputusan hak yang bergantung padanya dilayani service ini.
 	aksesSvc := service.NewAksesService(userRepo)
 
+	// War Room: angkanya HANYA dari data Marketing sendiri — iklan, WhatsApp dan
+	// Instagram lewat metaapi (dengan token pemanggil), plus keadaan Alur Konten
+	// dari basis data ini. Tidak ada angka divisi lain.
+	warroomSvc := service.NewWarRoomService(
+		service.NewSumberHTTP(cfg.MetaAPIBase, cfg.WarRoomRentang),
+		func(ctx context.Context) (service.WRKeputusanRingkas, error) {
+			terbuka, telat, selesai, err := warroomRepo.Ringkas(ctx, time.Now())
+			return service.WRKeputusanRingkas{Terbuka: int(terbuka), Telat: int(telat), Selesai7Hari: int(selesai)}, err
+		},
+		service.KontenDari(dashboardSvc, itemRepo, stepRepo, userRepo),
+		service.WRAturan{
+			BiayaPerHasilTarget: cfg.WarRoomTargetBiayaPerHasil,
+			FrekuensiMaks:       cfg.WarRoomFrekuensiMaks,
+			CTRMinPersen:        cfg.WarRoomCTRMinPersen,
+			JamBalasLeadMaks:    cfg.WarRoomJamBalasLead,
+		},
+		cfg.WarRoomRentang,
+	)
+
 	// Google Sheets client for the Content Plan sync (nil → public XLSX export).
 	sheetsClient, err := gsheets.New(cfg.GoogleCredentials)
 	if err != nil {
@@ -60,6 +80,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	metaH := NewMetaHandler(metaRepo, cfg.MetaToken, cfg.MetaAPIVersion, cfg.MetaBusinessID, cfg.MetaAdAccount)
 	metaOAuthH := NewMetaOAuthHandler(metaRepo, tokenMgr, cfg)
 	linkH := NewProjectLinkHandler(db)
+	warroomH := NewWarRoomHandler(warroomSvc, warroomRepo)
 	komentarH := NewStepCommentHandler(db)
 
 	hub := NewRealtimeHub()
@@ -118,6 +139,16 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			authed.GET("/meta/alur", func(c *gin.Context) {
 				c.JSON(http.StatusOK, service.AlurLabels)
 			})
+
+			// WAR ROOM. Muatannya boleh dibaca siapa pun yang berhak masuk
+			// Marketing — ia cuma angka yang sama dengan yang sudah mereka lihat
+			// di tab lain. Yang dibatasi adalah MENCATAT perintah: itu keputusan
+			// pimpinan, bukan catatan pribadi.
+			authed.GET("/warroom", warroomH.Muatan)
+			authed.GET("/warroom/keputusan", warroomH.Daftar)
+			authed.POST("/warroom/keputusan", middleware.TolakPeran(model.RoleStaff, model.RoleViewer), warroomH.Catat)
+			authed.PATCH("/warroom/keputusan/:id", middleware.TolakPeran(model.RoleStaff, model.RoleViewer), warroomH.Verifikasi)
+			authed.DELETE("/warroom/keputusan/:id", middleware.TolakPeran(model.RoleStaff, model.RoleViewer), warroomH.Hapus)
 
 			// Work items & steps (Alur A–D).
 			authed.GET("/work-items", itemH.List)

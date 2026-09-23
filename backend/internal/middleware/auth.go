@@ -82,6 +82,29 @@ func RequireRole(roles ...model.Role) gin.HandlerFunc {
 	}
 }
 
+// TolakPeran menolak peran yang disebut dan MEMBIARKAN sisanya lewat —
+// kebalikan dari RequireRole.
+//
+// Perlu karena peran lintas divisi (ceo, dirops) tidak ada di daftar peran
+// Marketing: RequireRole("kadep") akan menutup pintu justru bagi direksi, yaitu
+// orang yang war room ini dibuat untuknya. Menyebut siapa yang DILARANG membuat
+// aturannya bertahan saat peran baru muncul di master akun.
+func TolakPeran(roles ...model.Role) gin.HandlerFunc {
+	ditolak := make(map[model.Role]struct{}, len(roles))
+	for _, r := range roles {
+		ditolak[r] = struct{}{}
+	}
+	return func(c *gin.Context) {
+		role, _ := c.Get(ctxRole)
+		r, _ := role.(model.Role)
+		if _, ada := ditolak[r]; ada {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "peran " + string(r) + " tidak boleh mencatat keputusan war room"})
+			return
+		}
+		c.Next()
+	}
+}
+
 // CurrentUserID returns the authenticated user id from the context.
 func CurrentUserID(c *gin.Context) uint {
 	if v, ok := c.Get(ctxUserID); ok {

@@ -49,6 +49,8 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 		&model.ProjectLink{},
 		// Percakapan antar tim pada satu langkah alur konten.
 		&model.StepComment{},
+		// Perintah yang lahir dari War Room, beserta cara memverifikasinya.
+		&model.WarroomKeputusan{},
 	); err != nil {
 		return nil, err
 	}

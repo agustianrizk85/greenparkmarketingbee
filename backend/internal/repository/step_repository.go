@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"time"
 
 	"marketingflow/internal/model"
 
@@ -131,4 +132,23 @@ func (r *StepRepository) CountByStatus(workItemID uint) (map[model.StepStatus]in
 		out[r.Status] = r.Count
 	}
 	return out, nil
+}
+
+// LangkahSelesaiSejak mengembalikan langkah yang DISELESAIKAN sejak waktu
+// tertentu — bahan "berapa yang benar-benar dituntaskan orang ini".
+//
+// Dipisah dari OpenSteps karena keduanya menjawab pertanyaan yang berbeda:
+// OpenSteps adalah beban yang masih menggantung, ini adalah hasil kerja. Panel
+// performa butuh keduanya; menilai orang hanya dari sisa pekerjaannya membuat
+// yang paling produktif justru terlihat paling buruk.
+func (r *StepRepository) LangkahSelesaiSejak(sejak time.Time) ([]OpenStep, error) {
+	var rows []OpenStep
+	err := r.db.
+		Table("work_steps").
+		Select("work_steps.*, work_items.title as work_item_title").
+		Joins("JOIN work_items ON work_items.id = work_steps.work_item_id").
+		Where("work_steps.status = ? AND work_steps.completed_at >= ?", model.StatusDone, sejak).
+		Order("work_steps.completed_at desc").
+		Scan(&rows).Error
+	return rows, err
 }
