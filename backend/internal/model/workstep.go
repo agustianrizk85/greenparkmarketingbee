@@ -1,10 +1,6 @@
 package model
 
-import (
-	"time"
-
-	"gorm.io/datatypes"
-)
+import "time"
 
 // StepStatus is the checklist state of a single workflow step.
 type StepStatus string
@@ -54,9 +50,18 @@ type WorkStep struct {
 	BudgetAmount int64  `json:"budget_amount"` // rupiah, integer to avoid float rounding
 	Notes        string `gorm:"type:text" json:"notes"`
 
-	// Flexible structured data per step (links: brief, footage iCloud, hasil
-	// desain/video, Meta Ads, caption, jadwal posting).
-	Metadata datatypes.JSON `gorm:"type:jsonb" json:"metadata"`
+	// Isian bebas per langkah (tautan brief, footage iCloud, hasil desain/video,
+	// Meta Ads, caption, jadwal posting).
+	//
+	// BUKAN kolom. Isinya tinggal di tabel work_step_meta, satu baris per isian
+	// — lihat WorkStepMeta. Dulu ini satu kolom jsonb, dan sebagai kantong
+	// kunci-nilai ia tidak pernah bisa ditanyai tanpa membongkar JSON tiap baris.
+	//
+	// Diisi repository SESUDAH langkahnya dibaca. Sengaja tidak memakai hook
+	// AfterFind GORM: dua jalur baca ("Tugas Saya" dan tampilan lapangan)
+	// memakai Scan, dan hook TIDAK berjalan di sana — justru dua layar itu yang
+	// menyunting isian ini, jadi kekosongannya akan terlihat seperti data hilang.
+	Metadata map[string]string `gorm:"-" json:"metadata"`
 
 	CompletedBy *uint      `json:"completed_by"`
 	CompletedAt *time.Time `json:"completed_at"`

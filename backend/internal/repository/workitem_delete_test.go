@@ -11,7 +11,7 @@ import (
 // bukan pada kontennya, jadi itu bagian yang paling mudah tertinggal.
 func TestHapusSatuKontenMembawaAnaknya(t *testing.T) {
 	db := dbUji(t)
-	if err := db.AutoMigrate(&model.Document{}, &model.StepComment{}); err != nil {
+	if err := db.AutoMigrate(&model.Document{}, &model.StepComment{}, &model.WorkStepMeta{}); err != nil {
 		t.Fatalf("migrasi tambahan: %v", err)
 	}
 	r := NewWorkItemRepository(db)

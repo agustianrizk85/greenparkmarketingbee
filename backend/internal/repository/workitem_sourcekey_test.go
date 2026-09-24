@@ -17,7 +17,7 @@ func dbUji(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("buka db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.WorkItem{}, &model.WorkStep{}); err != nil {
+	if err := db.AutoMigrate(&model.WorkItem{}, &model.WorkStep{}, &model.WorkStepMeta{}); err != nil {
 		t.Fatalf("migrasi: %v", err)
 	}
 	return db

@@ -129,6 +129,13 @@ func (r *WorkItemRepository) DeleteItem(id uint) (ResetCounts, []string, error) 
 			if err := tx.Where("step_id IN ?", stepIDs).Delete(&model.StepComment{}).Error; err != nil {
 				return err
 			}
+			// Isian metadata juga menempel pada LANGKAH, dengan alasan yang sama
+			// persis seperti komentar: tanpa dihapus di sini ia jadi yatim, dan
+			// id langkah yang dipakai ulang akan memungutnya kembali — isian
+			// milik konten yang sudah dihapus muncul di konten yang baru.
+			if err := tx.Where("work_step_id IN ?", stepIDs).Delete(&model.WorkStepMeta{}).Error; err != nil {
+				return err
+			}
 		}
 
 		if err := tx.Model(&model.Document{}).Where("work_item_id = ?", id).Pluck("path", &berkas).Error; err != nil {

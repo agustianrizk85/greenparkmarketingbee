@@ -17,7 +17,7 @@ func svcUji(t *testing.T) (*WorkItemService, *StepService, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("buka db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.WorkItem{}, &model.WorkStep{}, &model.User{}, &model.Document{}); err != nil {
+	if err := db.AutoMigrate(&model.WorkItem{}, &model.WorkStep{}, &model.User{}, &model.Document{}, &model.WorkStepMeta{}); err != nil {
 		t.Fatalf("migrasi: %v", err)
 	}
 	items := repository.NewWorkItemRepository(db)

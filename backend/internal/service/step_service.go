@@ -1,15 +1,13 @@
 package service
 
 import (
-	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"marketingflow/internal/dto"
 	"marketingflow/internal/model"
 	"marketingflow/internal/repository"
-
-	"gorm.io/datatypes"
 )
 
 var (
@@ -61,11 +59,24 @@ func (s *StepService) Update(id uint, req dto.UpdateStepRequest, actor uint, rol
 		step.Notes = *req.Notes
 	}
 	if req.Metadata != nil {
-		raw, err := json.Marshal(req.Metadata)
-		if err != nil {
-			return nil, err
+		// Permintaan datang sebagai map[string]any karena itulah bentuk JSON-nya,
+		// tapi simpanannya teks: seluruh kunci yang terdaftar di catalog.go
+		// berisi tautan, tanggal, atau nama platform, dan layar membacanya lewat
+		// String() tanpa kecuali. Angka yang sesekali ikut (mis. nomor PR)
+		// diratakan jadi teks di sini, bukan dibiarkan memaksa kolom bertipe
+		// bebas.
+		meta := make(map[string]string, len(req.Metadata))
+		for k, v := range req.Metadata {
+			if v == nil {
+				continue // kunci yang dikosongkan = dihapus, bukan disimpan "null"
+			}
+			if s, ok := v.(string); ok {
+				meta[k] = s
+				continue
+			}
+			meta[k] = fmt.Sprint(v)
 		}
-		step.Metadata = datatypes.JSON(raw)
+		step.Metadata = meta
 	}
 	if req.SLADays != nil {
 		step.SLADays = *req.SLADays
