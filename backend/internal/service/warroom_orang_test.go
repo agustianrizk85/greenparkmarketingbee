@@ -17,7 +17,9 @@ func dbOrangUji(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("buka db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.WorkItem{}, &model.WorkStep{}, &model.User{}); err != nil {
+	// WorkStepMeta ikut: isian langkah pindah dari kolom jsonb ke tabel sendiri,
+	// dan jalur baca yang dipakai panel ini (OpenSteps/ByOwner) kini menyentuhnya.
+	if err := db.AutoMigrate(&model.WorkItem{}, &model.WorkStep{}, &model.User{}, &model.WorkStepMeta{}); err != nil {
 		t.Fatalf("migrasi: %v", err)
 	}
 	return db
