@@ -83,7 +83,9 @@ func Load() *Config {
 		AppPort: getEnv("APP_PORT", "8086"),
 		AppEnv:  getEnv("APP_ENV", "development"),
 
-		DBDriver:   getEnv("DB_DRIVER", "sqlite"),
+		// Default Postgres (sejak 2026-09-24, SQLite marketingflow.db dibuang).
+		// DB_DRIVER=sqlite masih diterima untuk tes, tapi jangan dipakai jalan.
+		DBDriver:   getEnv("DB_DRIVER", "postgres"),
 		DBPath:     getEnv("DB_PATH", "./marketingflow.db"),
 		DBHost:     getEnv("DB_HOST", "localhost"),
 		DBPort:     getEnv("DB_PORT", "5432"),
