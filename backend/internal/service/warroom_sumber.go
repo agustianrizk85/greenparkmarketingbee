@@ -82,14 +82,14 @@ func (s *SumberHTTP) IklanRinci(ctx context.Context, token string) (IklanRinciMe
 	return out, err
 }
 
-// ProyekMeta membaca peta proyek → akun iklan/WA/IG (dikelola di Admin).
-func (s *SumberHTTP) ProyekMeta(ctx context.Context, token string) ([]ProyekMeta, error) {
-	var out struct {
-		Projects []ProyekMeta `json:"projects"`
-	}
-	err := s.ambil(ctx, token, s.MetaBase+"/api/meta/projects", &out)
-	return out.Projects, err
-}
+// ProyekMeta DIHAPUS: War Room tidak lagi membaca /api/meta/projects.
+//
+// Daftar itu bukan daftar proyek jualan melainkan peta akun WA/IG ke tim yang
+// melayaninya — di data nyata barisnya dinamai "GP 1", "Team SPV 1". Proyek
+// jualan dimiliki master proyek dan GP dimiliki Master GP (Grup); keduanya
+// sampai ke sini lewat tanda per kampanye yang distempel metaapi ke setiap baris
+// /api/meta/ads. Satu panggilan HTTP lebih sedikit, dan satu sumber kegagalan
+// lebih sedikit.
 
 func ringkasURL(u string) string {
 	if i := strings.Index(u, "/api/"); i >= 0 {

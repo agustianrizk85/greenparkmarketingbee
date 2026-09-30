@@ -44,7 +44,6 @@ import (
 type SumberWarRoom interface {
 	Iklan(ctx context.Context, token string) (IklanMentah, error)
 	IklanRinci(ctx context.Context, token string) (IklanRinciMentah, error)
-	ProyekMeta(ctx context.Context, token string) ([]ProyekMeta, error)
 }
 
 // HitungKeputusan mengembalikan ringkasan perintah war room yang tercatat.
@@ -176,16 +175,14 @@ func (s *WarRoomService) Susun(ctx context.Context, token string, l WRLingkup) W
 	// lambat menambah waktu tunggu semua yang lain, dan war room adalah layar
 	// yang ditunggu orang sambil berdiri.
 	var (
-		iklan                         IklanMentah
-		rinci                         IklanRinciMentah
-		proyekMeta                    []ProyekMeta
-		errIklan, errRinci, errProyek error
-		wg                            sync.WaitGroup
+		iklan              IklanMentah
+		rinci              IklanRinciMentah
+		errIklan, errRinci error
+		wg                 sync.WaitGroup
 	)
-	wg.Add(3)
+	wg.Add(2)
 	go func() { defer wg.Done(); iklan, errIklan = s.sumber.Iklan(ctx, token) }()
 	go func() { defer wg.Done(); rinci, errRinci = s.sumber.IklanRinci(ctx, token) }()
-	go func() { defer wg.Done(); proyekMeta, errProyek = s.sumber.ProyekMeta(ctx, token) }()
 	wg.Wait()
 
 	if errIklan != nil {
@@ -200,12 +197,9 @@ func (s *WarRoomService) Susun(ctx context.Context, token string, l WRLingkup) W
 	if errRinci != nil {
 		celah = append(celah, "Tren harian dan naskah iklan tidak bisa dibaca: "+errRinci.Error())
 	}
-	if errProyek != nil {
-		celah = append(celah, "Peta proyek ke akun iklan tidak bisa dibaca: "+errProyek.Error())
-	}
 
-	saring := lingkupDari(l, proyekMeta)
-	pilihan := pilihanProyek(proyekMeta, iklan.Campaigns)
+	saring := lingkupDari(l, iklan.Campaigns)
+	pilihan := pilihanProyek(iklan.Campaigns)
 	wr := WarRoom{
 		Divisi:         "marketing",
 		TanggalData:    now.Format(time.RFC3339),
@@ -215,10 +209,10 @@ func (s *WarRoomService) Susun(ctx context.Context, token string, l WRLingkup) W
 		Aturan:         s.aturan,
 	}
 	if l.ProyekID != "" && !saring.ketemu {
-		celah = append(celah, "Proyek yang dipilih tidak ada di peta proyek; angka di layar kembali ke seluruh proyek.")
+		celah = append(celah, "Proyek yang dipilih belum punya satu pun kampanye bertanda; angka di layar kembali ke seluruh proyek.")
 	}
 	if l.ProyekID == "" && l.GP != "" && !saring.ketemu {
-		celah = append(celah, "GP yang dipilih tidak ada di peta proyek; angka di layar kembali ke seluruh proyek.")
+		celah = append(celah, "GP yang dipilih belum punya satu pun kampanye bertanda; angka di layar kembali ke seluruh proyek.")
 	}
 	// Pemilih yang kosong disebutkan apa adanya beserta jalan keluarnya. Tanpa
 	// baris ini layarnya cuma menyisakan tombol "Semua proyek" dan terbaca sebagai
@@ -231,7 +225,7 @@ func (s *WarRoomService) Susun(ctx context.Context, token string, l WRLingkup) W
 	wr.Iklan.Rentang = s.rentang
 	wr.KreatifLelah = s.hitungKreatif(rinci)
 	wr.Tren = potongTren(rinci)
-	wr.Proyek = s.hitungProyek(proyekMeta, iklan, saring)
+	wr.Proyek = s.hitungProyek(iklan, saring)
 
 	if s.konten != nil {
 		k, err := s.konten(ctx)
@@ -288,7 +282,7 @@ func (s *WarRoomService) simpanSinggahan(l WRLingkup, wr WarRoom, now time.Time)
 /* ---- penyaring lingkup ---------------------------------------------------- */
 
 // lingkupBerlaku adalah lingkup yang BENAR-BENAR dipakai sesudah permintaan
-// pemanggil dicocokkan ke peta proyek.
+// pemanggil dicocokkan ke kampanye yang ada.
 //
 // Dulu isinya kumpulan referensi AKUN Meta milik satu proyek, dan sebuah kampanye
 // dianggap milik proyek kalau akun iklannya tertaut ke proyek itu. Itu tidak
@@ -298,46 +292,41 @@ func (s *WarRoomService) simpanSinggahan(l WRLingkup, wr WarRoom, now time.Time)
 // "Belanja per Proyek" memajang Rp 0 untuk semua baris. Sekarang atribusinya
 // dibaca dari tanda per kampanye yang dipasang orang di halaman Iklan.
 type lingkupBerlaku struct {
-	proyekID int    // 0 = tidak menyaring per proyek
-	gp       string // "" = tidak menyaring per GP
-	nama     string
-	ketemu   bool
-	// gpProyek = id proyek → GP-nya, supaya menyaring per GP tidak perlu
-	// menelusuri daftar proyek untuk setiap kampanye.
-	gpProyek map[int]string
+	proyek string // "" = tidak menyaring per proyek
+	gp     string // "" = tidak menyaring per GP
+	nama   string
+	ketemu bool
 }
 
-// lingkupDari menerjemahkan permintaan pemanggil menjadi lingkup yang berlaku.
+// lingkupDari menerjemahkan permintaan pemanggil menjadi lingkup yang berlaku,
+// dicocokkan ke kampanye yang benar-benar ada.
 //
-// ProyekID menang atas GP kalau keduanya dikirim: yang lebih sempit adalah yang
+// Proyek menang atas GP kalau keduanya dikirim: yang lebih sempit adalah yang
 // baru saja ditekan orangnya, dan mengembalikannya ke seluruh GP akan terasa
 // seperti tombol yang tidak bekerja.
-func lingkupDari(l WRLingkup, proyek []ProyekMeta) lingkupBerlaku {
-	f := lingkupBerlaku{nama: "Semua proyek", gpProyek: make(map[int]string, len(proyek))}
-	for _, p := range proyek {
-		f.gpProyek[p.ID] = strings.TrimSpace(p.GP)
-	}
+func lingkupDari(l WRLingkup, kampanye []KampanyeMentah) lingkupBerlaku {
+	f := lingkupBerlaku{nama: "Semua proyek"}
 
-	if id := strings.TrimSpace(l.ProyekID); id != "" {
-		for _, p := range proyek {
-			if strconv.Itoa(p.ID) == id {
-				f.proyekID, f.nama, f.ketemu = p.ID, p.Name, true
-				f.gp = strings.TrimSpace(p.GP)
+	if p := strings.TrimSpace(l.ProyekID); p != "" {
+		for _, c := range kampanye {
+			if bertanda(c) && strings.EqualFold(strings.TrimSpace(c.ProjectName), p) {
+				// Ejaannya diambil dari data, bukan dari query, supaya judul layar
+				// memakai ejaan yang tersimpan walau orang menulis huruf kecil.
+				f.proyek, f.nama, f.ketemu = c.ProjectName, c.ProjectName, true
+				f.gp = strings.TrimSpace(c.GP)
 				return f
 			}
 		}
-		// Proyeknya tidak ada di peta. Lingkupnya tidak dipaksakan (angkanya akan
-		// kosong seluruhnya dan terbaca sebagai layar rusak); pemanggil memeriksa
-		// `ketemu` lalu menuliskannya sebagai celah data.
+		// Proyeknya tidak punya satu pun kampanye bertanda. Lingkupnya tidak
+		// dipaksakan (angkanya akan kosong seluruhnya dan terbaca sebagai layar
+		// rusak); pemanggil memeriksa `ketemu` lalu menuliskannya sebagai celah data.
 		return f
 	}
 
 	if gp := strings.TrimSpace(l.GP); gp != "" {
-		for _, p := range proyek {
-			if strings.EqualFold(strings.TrimSpace(p.GP), gp) {
-				// Nama GP-nya diambil dari data, bukan dari query, supaya judul layar
-				// memakai ejaan yang tersimpan ("GP1") walau orang menulis "gp1".
-				f.gp, f.nama, f.ketemu = strings.TrimSpace(p.GP), strings.TrimSpace(p.GP), true
+		for _, c := range kampanye {
+			if bertanda(c) && strings.EqualFold(strings.TrimSpace(c.GP), gp) {
+				f.gp, f.nama, f.ketemu = strings.TrimSpace(c.GP), strings.TrimSpace(c.GP), true
 				return f
 			}
 		}
@@ -351,63 +340,52 @@ func lingkupDari(l WRLingkup, proyek []ProyekMeta) lingkupBerlaku {
 // Dipisah dari `lolos` dengan sengaja: pemanggil harus bisa membedakan "di luar
 // lingkup" dari "belum ditandai". Keduanya sama-sama tidak ikut dijumlah, tapi
 // yang kedua adalah pekerjaan yang belum dikerjakan dan harus muncul di layar.
-func bertanda(c KampanyeMentah) bool { return c.ProjectID != 0 }
+func bertanda(c KampanyeMentah) bool { return strings.TrimSpace(c.ProjectName) != "" }
 
 // lolos melaporkan apakah kampanye bertanda ini masuk lingkup yang berlaku.
 func (f lingkupBerlaku) lolos(c KampanyeMentah) bool {
-	if f.proyekID != 0 {
-		return c.ProjectID == f.proyekID
+	if f.proyek != "" {
+		return strings.EqualFold(strings.TrimSpace(c.ProjectName), f.proyek)
 	}
 	if f.gp != "" {
-		return strings.EqualFold(strings.TrimSpace(f.gpProyek[c.ProjectID]), f.gp)
+		return strings.EqualFold(strings.TrimSpace(c.GP), f.gp)
 	}
 	return true
 }
 
-// pilihanProyek menyusun pemilih LINGKUP: hanya proyek yang PUNYA SETIDAKNYA SATU
-// KAMPANYE BERTANDA, atau setidaknya satu akun Meta tertaut.
+// pilihanProyek menyusun pemilih LINGKUP dari kampanye yang SUDAH DITANDAI.
 //
-// Peta proyek di metaapi menyimpan dua hal yang berbeda sebagai baris yang sama:
-// proyek jualan, dan wadah tim pelaksana yang dinamai bebas seperti "Team SPV 1".
-// Tanpa saringan, pemilih memajang keduanya berdampingan — dan orang di ruang
-// rapat diminta memilih "Team SPV 2" sebagai lingkup angka iklan, pilihan yang
-// tidak berarti apa-apa.
+// Dulu daftarnya diambil dari /api/meta/projects. Ternyata itu bukan daftar
+// proyek jualan melainkan peta akun WA/IG ke tim yang melayaninya, dan di data
+// nyata barisnya dinamai "GP 1", "Team SPV 1", "Gp1 TEs" — sehingga pemilih
+// meminta orang di ruang rapat memilih "Team SPV 2" sebagai lingkup angka iklan.
+// Proyek jualan dimiliki master proyek, GP dimiliki Master GP (Grup).
 //
-// Penandanya bukan nama. Mencocokkan kata "SPV" salah dua arah sekaligus: wadah
-// tim yang dinamai lain ("Gp1 TEs") tetap lolos, dan proyek jualan yang kebetulan
-// memuat kata itu ikut hilang. Bukan juga anggota sales — dicoba lebih dulu dan
-// ternyata tidak memisahkan apa pun: di data nyata KEEMPAT baris punya tepat satu
-// orang sales, termasuk ketiga wadah tim.
-//
-// Akun Meta sendirian juga tidak cukup, dan ini pelajaran dari produksi: TIDAK
-// SATU PUN dari keempat proyek punya akun iklan tertaut, jadi saringan
-// berbasis-akun menyisakan daftar kosong lalu jatuh ke cadangan "tampilkan
-// semua" — dan Team SPV muncul kembali justru di layar yang sudah "dibetulkan".
-// Kampanye bertanda-lah penandanya yang sebenarnya: wadah tim tidak akan pernah
-// punya satu pun.
-//
-// Daftar kosong TIDAK lagi diganti "tampilkan semua". Cadangan itu memang
-// dimaksudkan supaya pemilih tidak menyusut jadi satu tombol yang terbaca sebagai
-// layar rusak, tapi harganya terlalu mahal: ia menghidupkan kembali persis entri
-// yang disaring. Sebagai gantinya pemanggil menuliskan celah data yang menyebut
-// apa yang harus dilakukan — keterangan yang bisa ditindaklanjuti mengalahkan
-// daftar yang tampak penuh tapi salah.
-func pilihanProyek(proyek []ProyekMeta, kampanye []KampanyeMentah) []WRPilihan {
-	nTanda := map[int]int{}
+// Menurunkannya dari tanda kampanye menghapus seluruh persoalan itu sekaligus:
+// yang muncul persis proyek yang PUNYA belanja di layar ini, tidak ada daftar
+// kedua yang harus dirawat, dan tidak ada chip yang ketika ditekan menghasilkan
+// layar kosong.
+func pilihanProyek(kampanye []KampanyeMentah) []WRPilihan {
+	urut := []string{}
+	n := map[string]int{}
+	gp := map[string]string{}
 	for _, c := range kampanye {
-		if bertanda(c) {
-			nTanda[c.ProjectID]++
-		}
-	}
-	out := make([]WRPilihan, 0, len(proyek))
-	for _, p := range proyek {
-		if nTanda[p.ID] == 0 && len(p.Accounts) == 0 {
+		if !bertanda(c) {
 			continue
 		}
-		out = append(out, WRPilihan{
-			ID: strconv.Itoa(p.ID), Nama: p.Name,
-			GP: strings.TrimSpace(p.GP), Kampanye: nTanda[p.ID],
-		})
+		nama := strings.TrimSpace(c.ProjectName)
+		if _, ada := n[nama]; !ada {
+			urut = append(urut, nama)
+			gp[nama] = strings.TrimSpace(c.GP)
+		}
+		n[nama]++
+	}
+	out := make([]WRPilihan, 0, len(urut))
+	for _, nama := range urut {
+		// ID = namanya sendiri. Proyeknya milik master proyek dan tidak punya id di
+		// sini; memakai nama berarti tautan lingkup tetap berarti walau daftar
+		// kampanyenya berubah.
+		out = append(out, WRPilihan{ID: nama, Nama: nama, GP: gp[nama], Kampanye: n[nama]})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Nama < out[j].Nama })
 	return out
@@ -415,22 +393,18 @@ func pilihanProyek(proyek []ProyekMeta, kampanye []KampanyeMentah) []WRPilihan {
 
 // gpTersedia menyusun chip GP dari proyek yang lolos pemilih.
 //
-// Diambil dari pilihannya, bukan dari seluruh peta proyek, supaya tidak ada chip
-// GP yang ketika ditekan menghasilkan layar kosong karena satu-satunya proyek di
-// GP itu ternyata wadah tim.
-//
 // Proyek tanpa GP tidak melahirkan chip — chip kosong tidak bisa diberi nama —
 // tapi proyeknya tetap ada di daftar dropdown dan tetap bisa dipilih langsung.
 func gpTersedia(pilihan []WRPilihan) []string {
 	ada := map[string]bool{}
 	out := []string{}
 	for _, p := range pilihan {
-		gp := strings.TrimSpace(p.GP)
-		if gp == "" || ada[gp] {
+		g := strings.TrimSpace(p.GP)
+		if g == "" || ada[g] {
 			continue
 		}
-		ada[gp] = true
-		out = append(out, gp)
+		ada[g] = true
+		out = append(out, g)
 	}
 	sort.Strings(out)
 	return out
@@ -546,10 +520,10 @@ func (s *WarRoomService) nilaiKampanye(c KampanyeMentah) WRKampanye {
 		Belanja: c.Spend, Hasil: c.Results, BiayaPerHasil: bagi(c.Spend, c.Results),
 		CTR: c.CTR, Frekuensi: c.Frequency, Sumber: SumberMeta,
 		DiBawahAmbangBelajar: c.Spend < s.aturan.AmbangBelajarBelanja,
-		Proyek:               c.ProjectName,
-	}
-	if c.ProjectID != 0 {
-		k.ProyekID = strconv.Itoa(c.ProjectID)
+		// ProyekID = nama proyeknya. Proyek jualan dimiliki master proyek dan tidak
+		// punya id di layar ini; nama adalah kuncinya di mana-mana.
+		ProyekID: strings.TrimSpace(c.ProjectName),
+		Proyek:   strings.TrimSpace(c.ProjectName),
 	}
 	switch {
 	case c.Spend > 0 && c.Results == 0:
@@ -619,16 +593,18 @@ func potongTren(m IklanRinciMentah) []WRTitikTren {
 // Inilah yang membuat usulan "alihkan budget dari proyek A ke proyek B" punya
 // dasar tanpa menyentuh data Sales: dua proyek dibandingkan lewat belanja dan
 // biaya per hasilnya sendiri.
-func (s *WarRoomService) hitungProyek(proyek []ProyekMeta, ik IklanMentah, f lingkupBerlaku) []WRProyek {
-	// Belanja dan hasil dikumpulkan per id proyek dari TANDA kampanyenya, sekali
-	// jalan. Sebelumnya setiap proyek menelusuri ulang seluruh daftar kampanye dan
-	// mencocokkan akun iklannya — pekerjaan N×M yang, lebih buruk lagi, tidak
+func (s *WarRoomService) hitungProyek(ik IklanMentah, f lingkupBerlaku) []WRProyek {
+	// Dikumpulkan per NAMA proyek dari tanda kampanyenya, sekali jalan.
+	// Sebelumnya setiap proyek di peta menelusuri ulang seluruh daftar kampanye
+	// dan mencocokkan akun iklannya — pekerjaan N×M yang, lebih buruk lagi, tidak
 	// pernah bisa benar karena satu akun berisi kampanye dari banyak proyek.
 	type angka struct {
+		gp             string
 		belanja, hasil float64
 		kampanye       int
 	}
-	per := map[int]*angka{}
+	urut := []string{}
+	per := map[string]*angka{}
 	for _, c := range ik.Campaigns {
 		// Aturan yang sama dengan hitungIklan, urutan yang sama pula: yang sudah
 		// dimatikan tidak ikut, yang belum bertanda tidak ikut. Total di ubin dan
@@ -636,27 +612,26 @@ func (s *WarRoomService) hitungProyek(proyek []ProyekMeta, ik IklanMentah, f lin
 		if !kampanyeAktif(c) || !bertanda(c) || !f.lolos(c) {
 			continue
 		}
-		a := per[c.ProjectID]
+		nama := strings.TrimSpace(c.ProjectName)
+		a := per[nama]
 		if a == nil {
-			a = &angka{}
-			per[c.ProjectID] = a
+			a = &angka{gp: strings.TrimSpace(c.GP)}
+			per[nama] = a
+			urut = append(urut, nama)
 		}
 		a.belanja += c.Spend
 		a.hasil += c.Results
 		a.kampanye++
 	}
 
-	out := []WRProyek{}
-	for _, p := range proyek {
-		a := per[p.ID]
-		if a == nil {
-			// Proyek tanpa satu pun kampanye aktif bertanda tidak dibariskan dengan
-			// Rp 0. Baris nol di sini tidak bisa dibedakan dari "sudah ditandai, memang
-			// tidak belanja", dan itu yang dulu memajang tiga baris Team SPV berisi Rp 0.
-			continue
-		}
+	// Proyek tanpa satu pun kampanye aktif bertanda tidak dibariskan dengan Rp 0.
+	// Baris nol di sini tidak bisa dibedakan dari "sudah ditandai, memang tidak
+	// belanja", dan itu yang dulu memajang enam baris GP/Team SPV berisi Rp 0.
+	out := make([]WRProyek, 0, len(urut))
+	for _, nama := range urut {
+		a := per[nama]
 		out = append(out, WRProyek{
-			ID: strconv.Itoa(p.ID), Nama: p.Name, GP: strings.TrimSpace(p.GP),
+			ID: nama, Nama: nama, GP: a.gp,
 			Belanja: a.belanja, Hasil: a.hasil, Kampanye: a.kampanye,
 			BiayaPerHasil: bagi(a.belanja, a.hasil), Sumber: SumberMeta,
 		})

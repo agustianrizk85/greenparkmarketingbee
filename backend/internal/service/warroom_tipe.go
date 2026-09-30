@@ -318,17 +318,17 @@ type KampanyeMentah struct {
 	Issues          int     `json:"issues"`
 	IssueSummary    string  `json:"issueSummary"`
 
-	// Atribusi proyek, distempel metaapi dari tanda per kampanye.
+	// Atribusi, distempel metaapi dari tanda per kampanye: nama proyek MASTER
+	// beserta kode GP-nya dari Master GP (Grup).
 	//
-	// ProjectID 0 berarti kampanyenya BELUM ditandai, dan layar ini memang
+	// ProjectName KOSONG berarti kampanyenya BELUM ditandai, dan layar ini memang
 	// menyisihkannya — bukan menebaknya dari awalan nama. Nama kampanye diketik
 	// manusia: satu salah ketik akan memindahkan belanja ke proyek lain tanpa ada
 	// yang tahu, dan angka rapat ikut bergeser diam-diam.
 	//
-	// ProjectName dan GP ikut dikirim supaya baris "Belanja per proyek" tidak
-	// perlu mencocokkan ulang ke peta proyek; keduanya berasal dari proyeknya,
-	// jadi tidak bisa berselisih dengan ProjectID.
-	ProjectID   int    `json:"projectId"`
+	// Nama, bukan id baris: tabel `projects` metaapi memetakan akun WA/IG ke tim
+	// yang melayaninya ("GP 1", "Team SPV 1"), bukan daftar proyek jualan. Nama
+	// adalah jembatan yang sudah dipakai antara master proyek, Teknik dan metaapi.
 	ProjectName string `json:"projectName"`
 	GP          string `json:"gp"`
 }
@@ -370,31 +370,18 @@ type IklanRinciMentah struct {
 	Error      string            `json:"error"`
 }
 
-// AkunProyekMeta = satu akun (iklan/WhatsApp/Instagram) milik sebuah proyek.
-type AkunProyekMeta struct {
-	Kind  string `json:"kind"` // "wa" | "ig" | "ad"
-	Ref   string `json:"ref"`
-	Label string `json:"label"`
-}
-
-// SalesProyekMeta = satu orang sales yang ditugaskan ke sebuah proyek.
-//
-// Sudah lama dikirim metaapi (`ProjectSales`), tetapi dulu tidak diuraikan di
-// sini. Akibatnya War Room tidak punya cara membedakan proyek jualan dari entri
-// yang cuma wadah tim pelaksana — dan chip LINGKUP memajang "Team SPV 1/2/3"
-// berdampingan dengan proyek sungguhan.
-type SalesProyekMeta struct {
-	Email string `json:"email"`
-	Name  string `json:"name"`
-}
-
-// ProyekMeta = /api/meta/projects — peta proyek ke akun iklan/WA/IG dan timnya.
-type ProyekMeta struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
-	// GP = grup proyek ("GP1", "GP2"…), lingkup teratas di layar ini. Sumbernya
-	// satu: kolom `gp` pada proyek di metaapi, ejaan yang sama dengan legalpermit.
-	GP       string            `json:"gp"`
-	Accounts []AkunProyekMeta  `json:"accounts"`
-	Sales    []SalesProyekMeta `json:"sales"`
-}
+/* ProyekMeta, AkunProyekMeta dan SalesProyekMeta DIHAPUS.
+ *
+ * Ketiganya menguraikan /api/meta/projects, yang dipakai War Room untuk dua hal:
+ * menyusun pemilih lingkup, dan mencocokkan kampanye ke proyek lewat akun
+ * iklannya. Keduanya sudah tidak berlaku.
+ *
+ * Pencocokan lewat akun tidak pernah bisa benar — satu akun iklan berisi
+ * kampanye dari banyak proyek. Dan daftar itu sendiri bukan daftar proyek
+ * jualan: ia memetakan akun WA/IG ke tim yang melayaninya, dan di data nyata
+ * barisnya dinamai "GP 1", "Team SPV 1", "Gp1 TEs".
+ *
+ * Sekarang keduanya diturunkan dari kampanye yang SUDAH DITANDAI, yang membawa
+ * nama proyek master beserta kode GP-nya. Satu sumber, dan sumber itu persis
+ * yang menentukan apakah sebuah proyek punya angka di layar ini.
+ */
