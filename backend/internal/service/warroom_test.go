@@ -290,20 +290,27 @@ func (s *sumberHitung) IklanRinci(context.Context, string) (IklanRinciMentah, er
 }
 func (s *sumberHitung) ProyekMeta(context.Context, string) ([]ProyekMeta, error) { return nil, nil }
 
-// TestChipLingkupHanyaProyekBertimSales: peta proyek di metaapi memuat DUA jenis
+// TestChipLingkupHanyaProyekBerakunMeta: peta proyek di metaapi memuat DUA jenis
 // baris — proyek jualan, dan wadah tim pelaksana yang dinamai bebas seperti
-// "Team SPV 1". Keduanya tersimpan sama, jadi tanpa saringan chip LINGKUP
-// meminta orang di ruang rapat memilih "Team SPV 2" sebagai lingkup angka
-// iklan — pilihan yang tidak berarti apa-apa.
-func TestChipLingkupHanyaProyekBertimSales(t *testing.T) {
+// "Team SPV 1". Tanpa saringan, chip LINGKUP meminta orang di ruang rapat
+// memilih "Team SPV 2" sebagai lingkup angka iklan — pilihan yang tidak berarti
+// apa-apa.
+//
+// Penandanya AKUN META, bukan anggota sales: di data nyata keempat baris punya
+// tepat satu orang sales, termasuk ketiga wadah tim, jadi sales tidak memisahkan
+// apa pun.
+func TestChipLingkupHanyaProyekBerakunMeta(t *testing.T) {
 	pilih := pilihanProyek([]ProyekMeta{
-		{ID: 7, Name: "GP Mawar", Sales: []SalesProyekMeta{{Email: "a@x.id", Name: "Andi"}}},
-		{ID: 9, Name: "Team SPV 1"},
-		{ID: 8, Name: "GP Melati", Sales: []SalesProyekMeta{{Email: "b@x.id", Name: "Budi"}}},
-		{ID: 10, Name: "Team SPV 2"},
+		// Wadah tim: punya sales, tapi nol akun Meta. Persis bentuk data nyata.
+		{ID: 9, Name: "Team SPV 1", Sales: []SalesProyekMeta{{Email: "s1@x.id"}}},
+		{ID: 7, Name: "GP Mawar", Sales: []SalesProyekMeta{{Email: "a@x.id"}},
+			Accounts: []AkunProyekMeta{{Kind: "ad", Ref: "akun-b"}}},
+		{ID: 10, Name: "Team SPV 2", Sales: []SalesProyekMeta{{Email: "s2@x.id"}}},
+		// WA/IG saja sudah cukup — lihat alasannya di pilihanProyek().
+		{ID: 8, Name: "GP Melati", Accounts: []AkunProyekMeta{{Kind: "wa", Ref: "wa1"}}},
 	})
 	if len(pilih) != 2 {
-		t.Fatalf("chip lingkup = %+v, mau hanya dua proyek bertim sales", pilih)
+		t.Fatalf("chip lingkup = %+v, mau hanya dua proyek berakun Meta", pilih)
 	}
 	for _, p := range pilih {
 		if p.Nama == "Team SPV 1" || p.Nama == "Team SPV 2" {
@@ -316,16 +323,17 @@ func TestChipLingkupHanyaProyekBertimSales(t *testing.T) {
 	}
 }
 
-// TestChipLingkupTidakPernahKosong menjaga jalur cadangannya. Tim sales diisi
-// belakangan lewat Panel Admin, jadi peta yang belum dilengkapi akan menyusutkan
-// pemilih lingkup jadi satu tombol "Semua proyek" — kontrol yang rusak, dan yang
-// melihatnya akan menyangka layarnya gagal memuat, bukan datanya yang belum ada.
+// TestChipLingkupTidakPernahKosong menjaga jalur cadangannya. Akun Meta ditautkan
+// belakangan lewat menu Akun Meta, jadi peta yang belum dilengkapi akan
+// menyusutkan pemilih lingkup jadi satu tombol "Semua proyek" — kontrol yang
+// rusak, dan yang melihatnya akan menyangka layarnya gagal memuat, bukan datanya
+// yang belum ada.
 func TestChipLingkupTidakPernahKosong(t *testing.T) {
 	pilih := pilihanProyek([]ProyekMeta{
 		{ID: 9, Name: "Team SPV 1"},
 		{ID: 10, Name: "Team SPV 2"},
 	})
 	if len(pilih) != 2 {
-		t.Fatalf("tanpa satu pun tim sales, saringan harus dilepas: %+v", pilih)
+		t.Fatalf("tanpa satu pun akun Meta, saringan harus dilepas: %+v", pilih)
 	}
 }

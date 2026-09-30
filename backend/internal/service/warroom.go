@@ -324,34 +324,44 @@ func (s saringan) lolosIklan(akunID, akun string) bool {
 }
 
 // pilihanProyek menyusun chip LINGKUP — dan hanya memuat proyek yang PUNYA
-// ANGGOTA SALES.
+// SETIDAKNYA SATU AKUN META (iklan, WhatsApp, atau Instagram).
 //
-// Peta proyek di metaapi dipakai untuk dua hal yang berbeda: proyek jualan
-// (punya tim sales, punya akun iklan) dan wadah tim pelaksana yang dinamai
-// bebas, mis. "Team SPV 1". Keduanya tersimpan sebagai baris yang sama, jadi
-// tanpa saringan ini chip LINGKUP memajang keduanya berdampingan — dan orang di
-// ruang rapat diminta memilih "Team SPV 2" sebagai lingkup angka iklan, yang
-// tidak berarti apa-apa.
+// Peta proyek di metaapi dipakai untuk dua hal yang berbeda: proyek jualan, dan
+// wadah tim pelaksana yang dinamai bebas seperti "Team SPV 1". Keduanya
+// tersimpan sebagai baris yang sama, jadi tanpa saringan chip LINGKUP memajang
+// keduanya berdampingan — dan orang di ruang rapat diminta memilih "Team SPV 2"
+// sebagai lingkup angka iklan, pilihan yang tidak berarti apa-apa.
 //
-// Penandanya anggota sales, BUKAN tebakan dari namanya. Mencocokkan kata "SPV"
-// di nama akan salah dua arah sekaligus: tim pelaksana yang dinamai lain tetap
-// lolos, dan proyek jualan yang kebetulan memuat kata itu ikut hilang.
+// Penandanya akun Meta, dan itu bukan pilihan sembarangan:
+//
+//   - BUKAN nama. Mencocokkan kata "SPV" salah dua arah sekaligus: wadah tim
+//     yang dinamai lain ("Gp1 TEs") tetap lolos, dan proyek jualan yang
+//     kebetulan memuat kata itu ikut hilang.
+//   - BUKAN anggota sales. Dicoba lebih dulu, dan ternyata tidak memisahkan
+//     apa pun: di data nyata KEEMPAT baris punya tepat satu orang sales,
+//     termasuk ketiga wadah tim.
+//   - Akun Meta memisahkannya bersih DAN benar menurut makna layarnya: seluruh
+//     angka War Room Marketing berasal dari akun Meta, jadi proyek tanpa satu
+//     pun akun memang tidak bisa punya angka di sini.
+//
+// Sengaja menerima wa/ig, bukan cuma iklan. Kalau disyaratkan akun iklan,
+// proyek yang WhatsApp-nya sudah tertaut tapi akun iklannya belum akan hilang
+// dari pemilih — padahal justru itu yang perlu terlihat supaya orang tahu ada
+// yang belum dilengkapi.
 func pilihanProyek(proyek []ProyekMeta) []WRPilihan {
 	out := make([]WRPilihan, 0, len(proyek))
 	for _, p := range proyek {
-		if len(p.Sales) == 0 {
+		if len(p.Accounts) == 0 {
 			continue
 		}
 		out = append(out, WRPilihan{ID: strconv.Itoa(p.ID), Nama: p.Name})
 	}
-	// Kalau TIDAK ADA satu pun proyek bertim sales, saringannya dilepas dan
+	// Kalau TIDAK ADA satu pun proyek berakun Meta, saringannya dilepas dan
 	// seluruh proyek ditampilkan.
 	//
 	// Bukan kelonggaran: pemilih lingkup yang menyusut jadi satu tombol "Semua
 	// proyek" adalah kontrol yang rusak, dan orang akan menyangka layarnya yang
-	// gagal memuat. Keadaan itu nyata — tim sales baru diisi belakangan lewat
-	// Panel Admin, jadi peta yang belum dilengkapi akan mengosongkan pemilihnya
-	// sama sekali.
+	// gagal memuat, bukan petanya yang belum dilengkapi.
 	if len(out) == 0 {
 		for _, p := range proyek {
 			out = append(out, WRPilihan{ID: strconv.Itoa(p.ID), Nama: p.Name})
