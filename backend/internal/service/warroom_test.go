@@ -289,3 +289,43 @@ func (s *sumberHitung) IklanRinci(context.Context, string) (IklanRinciMentah, er
 	return IklanRinciMentah{}, nil
 }
 func (s *sumberHitung) ProyekMeta(context.Context, string) ([]ProyekMeta, error) { return nil, nil }
+
+// TestChipLingkupHanyaProyekBertimSales: peta proyek di metaapi memuat DUA jenis
+// baris — proyek jualan, dan wadah tim pelaksana yang dinamai bebas seperti
+// "Team SPV 1". Keduanya tersimpan sama, jadi tanpa saringan chip LINGKUP
+// meminta orang di ruang rapat memilih "Team SPV 2" sebagai lingkup angka
+// iklan — pilihan yang tidak berarti apa-apa.
+func TestChipLingkupHanyaProyekBertimSales(t *testing.T) {
+	pilih := pilihanProyek([]ProyekMeta{
+		{ID: 7, Name: "GP Mawar", Sales: []SalesProyekMeta{{Email: "a@x.id", Name: "Andi"}}},
+		{ID: 9, Name: "Team SPV 1"},
+		{ID: 8, Name: "GP Melati", Sales: []SalesProyekMeta{{Email: "b@x.id", Name: "Budi"}}},
+		{ID: 10, Name: "Team SPV 2"},
+	})
+	if len(pilih) != 2 {
+		t.Fatalf("chip lingkup = %+v, mau hanya dua proyek bertim sales", pilih)
+	}
+	for _, p := range pilih {
+		if p.Nama == "Team SPV 1" || p.Nama == "Team SPV 2" {
+			t.Fatalf("wadah tim pelaksana ikut jadi chip lingkup: %+v", pilih)
+		}
+	}
+	// Urut nama, supaya posisi chip tidak berpindah-pindah antar pembacaan.
+	if pilih[0].Nama != "GP Mawar" || pilih[1].Nama != "GP Melati" {
+		t.Fatalf("urutan chip tidak stabil: %+v", pilih)
+	}
+}
+
+// TestChipLingkupTidakPernahKosong menjaga jalur cadangannya. Tim sales diisi
+// belakangan lewat Panel Admin, jadi peta yang belum dilengkapi akan menyusutkan
+// pemilih lingkup jadi satu tombol "Semua proyek" — kontrol yang rusak, dan yang
+// melihatnya akan menyangka layarnya gagal memuat, bukan datanya yang belum ada.
+func TestChipLingkupTidakPernahKosong(t *testing.T) {
+	pilih := pilihanProyek([]ProyekMeta{
+		{ID: 9, Name: "Team SPV 1"},
+		{ID: 10, Name: "Team SPV 2"},
+	})
+	if len(pilih) != 2 {
+		t.Fatalf("tanpa satu pun tim sales, saringan harus dilepas: %+v", pilih)
+	}
+}

@@ -323,10 +323,39 @@ func (s saringan) lolosIklan(akunID, akun string) bool {
 	return s.iklan[strings.ToLower(akunID)] || s.iklan[strings.ToLower(akun)]
 }
 
+// pilihanProyek menyusun chip LINGKUP — dan hanya memuat proyek yang PUNYA
+// ANGGOTA SALES.
+//
+// Peta proyek di metaapi dipakai untuk dua hal yang berbeda: proyek jualan
+// (punya tim sales, punya akun iklan) dan wadah tim pelaksana yang dinamai
+// bebas, mis. "Team SPV 1". Keduanya tersimpan sebagai baris yang sama, jadi
+// tanpa saringan ini chip LINGKUP memajang keduanya berdampingan — dan orang di
+// ruang rapat diminta memilih "Team SPV 2" sebagai lingkup angka iklan, yang
+// tidak berarti apa-apa.
+//
+// Penandanya anggota sales, BUKAN tebakan dari namanya. Mencocokkan kata "SPV"
+// di nama akan salah dua arah sekaligus: tim pelaksana yang dinamai lain tetap
+// lolos, dan proyek jualan yang kebetulan memuat kata itu ikut hilang.
 func pilihanProyek(proyek []ProyekMeta) []WRPilihan {
 	out := make([]WRPilihan, 0, len(proyek))
 	for _, p := range proyek {
+		if len(p.Sales) == 0 {
+			continue
+		}
 		out = append(out, WRPilihan{ID: strconv.Itoa(p.ID), Nama: p.Name})
+	}
+	// Kalau TIDAK ADA satu pun proyek bertim sales, saringannya dilepas dan
+	// seluruh proyek ditampilkan.
+	//
+	// Bukan kelonggaran: pemilih lingkup yang menyusut jadi satu tombol "Semua
+	// proyek" adalah kontrol yang rusak, dan orang akan menyangka layarnya yang
+	// gagal memuat. Keadaan itu nyata — tim sales baru diisi belakangan lewat
+	// Panel Admin, jadi peta yang belum dilengkapi akan mengosongkan pemilihnya
+	// sama sekali.
+	if len(out) == 0 {
+		for _, p := range proyek {
+			out = append(out, WRPilihan{ID: strconv.Itoa(p.ID), Nama: p.Name})
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Nama < out[j].Nama })
 	return out

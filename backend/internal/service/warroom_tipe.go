@@ -317,9 +317,21 @@ type AkunProyekMeta struct {
 	Label string `json:"label"`
 }
 
+// SalesProyekMeta = satu orang sales yang ditugaskan ke sebuah proyek.
+//
+// Sudah lama dikirim metaapi (`ProjectSales`), tetapi dulu tidak diuraikan di
+// sini. Akibatnya War Room tidak punya cara membedakan proyek jualan dari entri
+// yang cuma wadah tim pelaksana — dan chip LINGKUP memajang "Team SPV 1/2/3"
+// berdampingan dengan proyek sungguhan.
+type SalesProyekMeta struct {
+	Email string `json:"email"`
+	Name  string `json:"name"`
+}
+
 // ProyekMeta = /api/meta/projects — peta proyek ke akun iklan/WA/IG dan timnya.
 type ProyekMeta struct {
-	ID       int              `json:"id"`
-	Name     string           `json:"name"`
-	Accounts []AkunProyekMeta `json:"accounts"`
+	ID       int               `json:"id"`
+	Name     string            `json:"name"`
+	Accounts []AkunProyekMeta  `json:"accounts"`
+	Sales    []SalesProyekMeta `json:"sales"`
 }
