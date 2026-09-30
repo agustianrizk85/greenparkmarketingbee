@@ -36,13 +36,31 @@ type SumberHTTP struct {
 	klien    *http.Client
 }
 
+// batasTungguMeta: batas tunggu saat memanggil metaapi.
+//
+// 20 detik dulu, dan itu terlalu ketat. /api/meta/ads memanggil Graph API Meta
+// beberapa kali per akun iklan; dengan empat akun jumlahnya lewat dari 20 detik,
+// dan War Room menyerah dengan "context deadline exceeded" lalu memajang "akun
+// iklan belum tersambung" di delapan ubin — seolah tidak ada akun yang
+// tersambung sama sekali, padahal semuanya sehat dan cuma lambat.
+//
+// Panggilan itu kini ditarik berbarengan di metaapi sehingga jauh lebih cepat,
+// tapi batas ini tetap dilonggarkan: kalau Meta sedang lambat, lebih baik War
+// Room menunggu sekali lalu menyimpan hasilnya satu menit daripada gagal
+// selamanya dan tidak pernah punya apa pun untuk disimpan.
+//
+// Layar sendiri menyerah lebih dulu (20 detik) dan menampilkan data sebelumnya.
+// Itu tidak apa-apa: begitu panggilan ini selesai, hasilnya masuk singgahan dan
+// pembacaan layar berikutnya mendapatkannya seketika.
+const batasTungguMeta = 45 * time.Second
+
 // NewSumberHTTP merakit pembaca dengan batas waktu yang wajar untuk layar yang
 // ditunggu orang: lebih baik satu blok abu daripada layar yang berputar lama.
 func NewSumberHTTP(metaBase, rentang string) *SumberHTTP {
 	return &SumberHTTP{
 		MetaBase: strings.TrimRight(metaBase, "/"),
 		Rentang:  rentang,
-		klien:    &http.Client{Timeout: 20 * time.Second},
+		klien:    &http.Client{Timeout: batasTungguMeta},
 	}
 }
 
