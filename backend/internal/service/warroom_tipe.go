@@ -119,6 +119,16 @@ type WRIklan struct {
 	KampanyeBermasalah int     `json:"kampanye_bermasalah"`
 	BelanjaBoros       float64 `json:"belanja_boros"`
 	PersenBelanjaBoros float64 `json:"persen_belanja_boros"`
+
+	// Kampanye TIDAK AKTIF yang dikecualikan dari seluruh angka di atas, beserta
+	// uang yang terlanjur mereka pakai dalam rentang ini.
+	//
+	// Wajib ikut ditampilkan, bukan jadi catatan kaki: begitu yang non-aktif
+	// dikecualikan, "Belanja" di layar ini TIDAK LAGI SAMA dengan yang dilaporkan
+	// Meta untuk periode yang sama. Tanpa kedua angka ini, orang yang
+	// membandingkan dua layar akan mengira salah satunya rusak.
+	KampanyeNonAktif int     `json:"kampanye_non_aktif"`
+	BelanjaNonAktif  float64 `json:"belanja_non_aktif"`
 }
 
 // WRKampanye adalah satu kampanye beserta alasan ia masuk daftar.

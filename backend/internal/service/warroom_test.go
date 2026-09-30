@@ -337,3 +337,57 @@ func TestChipLingkupTidakPernahKosong(t *testing.T) {
 		t.Fatalf("tanpa satu pun akun Meta, saringan harus dilepas: %+v", pilih)
 	}
 }
+
+// TestHanyaKampanyeAktifYangDihitung mengunci permintaan pemilik repo: seluruh
+// angka layar disusun dari kampanye yang MASIH BERJALAN.
+//
+// Layar rapat dipakai memutuskan apa yang harus dilakukan hari ini. Kampanye
+// yang sudah dimatikan tidak bisa ditindaklanjuti, tapi belanjanya menaikkan
+// total dan menyeret biaya-per-hasil — sehingga keputusan diambil dari angka
+// yang sebagian miliknya kampanye yang sudah tidak ada.
+func TestHanyaKampanyeAktifYangDihitung(t *testing.T) {
+	m := IklanMentah{Configured: true}
+	aktif := kampanye("a1", "Masih jalan", "akun-a", 1_000_000, 20, 2.0, 1.5)
+	mati := kampanye("a2", "Sudah dimatikan", "akun-a", 4_000_000, 5, 0.5, 3)
+	mati.EffectiveStatus = "CAMPAIGN_PAUSED"
+	m.Campaigns = append(m.Campaigns, aktif, mati)
+
+	svc := NewWarRoomService(nil, nil, nil, WRAturan{BiayaPerHasilTarget: 100000}, "30d")
+	out, _, _ := svc.hitungIklan(m, saringan{})
+
+	if out.Belanja != 1_000_000 {
+		t.Fatalf("belanja = %v, mau 1jt (hanya yang aktif)", out.Belanja)
+	}
+	if out.Hasil != 20 {
+		t.Fatalf("hasil = %v, mau 20 (hanya yang aktif)", out.Hasil)
+	}
+	if out.KampanyeAktif != 1 {
+		t.Fatalf("kampanye aktif = %d, mau 1", out.KampanyeAktif)
+	}
+	// Yang dikecualikan TIDAK boleh hilang tanpa jejak: sesudah saringan ini
+	// "Belanja" tidak lagi sama dengan laporan Meta untuk periode yang sama, dan
+	// yang membandingkan dua layar harus bisa melihat selisihnya.
+	if out.KampanyeNonAktif != 1 || out.BelanjaNonAktif != 4_000_000 {
+		t.Fatalf("yang dikecualikan harus tetap dilaporkan: %d kampanye, belanja %v",
+			out.KampanyeNonAktif, out.BelanjaNonAktif)
+	}
+}
+
+// TestEffectiveStatusMengalahkanStatus: Meta memisahkan kedua kolom itu justru
+// untuk kasus ini. Kampanye bisa ber-status ACTIVE sementara effectiveStatus-nya
+// ADSET_PAUSED — ia tidak tayang, tapi kolom status miliknya sendiri tidak
+// pernah berubah. Memakai `status` akan menghitungnya sebagai aktif selamanya.
+func TestEffectiveStatusMengalahkanStatus(t *testing.T) {
+	c := kampanye("x", "Adset dimatikan", "akun-a", 500_000, 3, 1.0, 1)
+	c.Status = "ACTIVE"
+	c.EffectiveStatus = "ADSET_PAUSED"
+	if kampanyeAktif(c) {
+		t.Fatal("status ACTIVE tidak boleh mengalahkan effectiveStatus ADSET_PAUSED")
+	}
+	// Muatan lama tidak mengirim effectiveStatus sama sekali; di situ `status`
+	// yang dipakai, supaya layar tidak kosong tanpa sebab yang bisa dilihat.
+	c.EffectiveStatus = ""
+	if !kampanyeAktif(c) {
+		t.Fatal("tanpa effectiveStatus, status ACTIVE harus dipakai sebagai cadangan")
+	}
+}

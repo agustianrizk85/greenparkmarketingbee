@@ -378,6 +378,25 @@ func pilihanProyek(proyek []ProyekMeta) []WRPilihan {
 //
 // Totalnya dihitung ulang dari kampanye — TIDAK memakai "totals" bawaan metaapi
 // — supaya lingkup "semua" dan lingkup satu proyek memakai rumus yang sama.
+// kampanyeAktif memutuskan apakah sebuah kampanye masih berjalan.
+//
+// `effectiveStatus` yang menentukan, BUKAN `status`. Meta memisahkan keduanya
+// justru untuk kasus ini: sebuah kampanye bisa ber-`status: ACTIVE` sementara
+// `effectiveStatus`-nya `CAMPAIGN_PAUSED`, `ADSET_PAUSED`, atau
+// `ACCOUNT_DISABLED` — ia tidak tayang, tapi kolom status miliknya sendiri tidak
+// pernah berubah. Memakai `status` akan menghitung kampanye yang sudah berhenti
+// berbulan-bulan sebagai aktif.
+//
+// `status` hanya dipakai kalau `effectiveStatus` tidak dikirim sama sekali:
+// muatan lama tidak punya field itu, dan membuang seluruh kampanye di situ akan
+// mengosongkan layar tanpa sebab yang bisa dilihat.
+func kampanyeAktif(c KampanyeMentah) bool {
+	if e := strings.TrimSpace(c.EffectiveStatus); e != "" {
+		return strings.EqualFold(e, "ACTIVE")
+	}
+	return strings.EqualFold(strings.TrimSpace(c.Status), "ACTIVE")
+}
+
 func (s *WarRoomService) hitungIklan(m IklanMentah, f saringan) (WRIklan, []WRKampanye, []WRKampanye) {
 	out := WRIklan{Sumber: SumberMeta, Terpasang: m.Configured}
 	boros := []WRKampanye{}
@@ -387,15 +406,30 @@ func (s *WarRoomService) hitungIklan(m IklanMentah, f saringan) (WRIklan, []WRKa
 		if !f.lolosIklan(c.AccountID, c.Account) {
 			continue
 		}
+		// HANYA KAMPANYE AKTIF yang menyusun angka layar ini.
+		//
+		// Layar rapat dipakai untuk memutuskan apa yang harus dilakukan HARI INI:
+		// mana yang harus dihentikan, kreatif mana yang harus diganti, ke mana
+		// budget dialihkan. Kampanye yang sudah dimatikan tidak bisa ditindaklanjuti
+		// lagi, tapi belanjanya menaikkan total dan menyeret biaya-per-hasil —
+		// sehingga keputusan diambil dari angka yang sebagian miliknya kampanye
+		// yang sudah tidak ada.
+		//
+		// Yang dikecualikan tetap DIHITUNG dan dipajang terpisah (lihat
+		// KampanyeNonAktif/BelanjaNonAktif), karena sesudah ini "Belanja" di sini
+		// tidak lagi sama dengan laporan Meta untuk periode yang sama.
+		if !kampanyeAktif(c) {
+			out.KampanyeNonAktif++
+			out.BelanjaNonAktif += c.Spend
+			continue
+		}
 		out.Belanja += c.Spend
 		out.Hasil += c.Results
 		out.Impresi += c.Impressions
 		out.Klik += c.Clicks
 		out.JangkauanTerjumlah += c.Reach
 		out.FrekuensiTertinggi = math.Max(out.FrekuensiTertinggi, c.Frequency)
-		if strings.EqualFold(c.EffectiveStatus, "ACTIVE") || strings.EqualFold(c.Status, "ACTIVE") {
-			out.KampanyeAktif++
-		}
+		out.KampanyeAktif++
 		if c.Issues > 0 {
 			out.KampanyeBermasalah++
 		}
