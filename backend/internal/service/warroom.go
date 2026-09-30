@@ -539,6 +539,14 @@ func potongTren(m IklanRinciMentah) []WRTitikTren {
 func (s *WarRoomService) hitungProyek(proyek []ProyekMeta, ik IklanMentah, f saringan) []WRProyek {
 	out := []WRProyek{}
 	for _, p := range proyek {
+		// Wadah tim pelaksana ("Team SPV 1") tidak ikut, dengan penanda yang SAMA
+		// dengan chip LINGKUP: punya akun Meta atau tidak. Dua daftar di satu layar
+		// yang memakai aturan berbeda akan saling membantah — dan itu persis yang
+		// terjadi sebelum ini: chip sudah bersih, tapi panel "Belanja per proyek"
+		// masih memajang tiga baris Team SPV berisi Rp 0.
+		if len(p.Accounts) == 0 {
+			continue
+		}
 		fp := saringanProyek(p)
 		// Saat lingkupnya satu proyek, proyek lain tidak ikut ditampilkan —
 		// layar dan AI harus melihat cakupan yang sama persis.
@@ -548,6 +556,11 @@ func (s *WarRoomService) hitungProyek(proyek []ProyekMeta, ik IklanMentah, f sar
 		baris := WRProyek{ID: strconv.Itoa(p.ID), Nama: p.Name, Sumber: SumberMeta}
 		for _, c := range ik.Campaigns {
 			if !fp.lolosIklan(c.AccountID, c.Account) {
+				continue
+			}
+			// Aturan yang sama dengan hitungIklan: yang sudah dimatikan tidak ikut,
+			// supaya total di ubin dan jumlah baris per proyek tidak berbeda.
+			if !kampanyeAktif(c) {
 				continue
 			}
 			baris.Belanja += c.Spend
