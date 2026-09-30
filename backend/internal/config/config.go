@@ -64,7 +64,7 @@ type Config struct {
 	// bisnis yang berubah tiap kampanye besar, dan mengubahnya tidak boleh
 	// menuntut pemasangan ulang.
 	MetaAPIBase                string
-	WarRoomRentang             string // rentang data iklan: 7d | 30d | 90d …
+	WarRoomRentang             string // rentang data iklan: today | 7d | 30d | 90d …
 	WarRoomTargetBiayaPerHasil float64
 	WarRoomFrekuensiMaks       float64
 	WarRoomCTRMinPersen        float64
@@ -122,8 +122,19 @@ func Load() *Config {
 		ContentSheetID:    getEnv("CONTENT_SHEET_ID", defaultContentSheetID),
 		GoogleCredentials: loadGoogleCredentials(),
 
-		MetaAPIBase:                getEnv("META_API_BASE", "http://localhost:8097"),
-		WarRoomRentang:             getEnv("WARROOM_RENTANG", "30d"),
+		MetaAPIBase: getEnv("META_API_BASE", "http://localhost:8097"),
+		// HARI INI, bukan 30 hari.
+		//
+		// War Room dipakai memutuskan apa yang dilakukan HARI INI: mana yang
+		// dihentikan, kreatif mana yang diganti, ke mana budget dialihkan.
+		// Rentang 30 hari menjawab pertanyaan yang lain — ia menjumlah belanja
+		// sebulan (Rp 4,6 jt) dan menyajikannya di layar yang seluruh kalimatnya
+		// berbicara tentang tindakan hari ini, sehingga yang membacanya mengira
+		// itulah yang dibelanjakan hari ini.
+		//
+		// Tetap bisa diubah lewat env: rapat mingguan yang butuh 7d tidak perlu
+		// menunggu rilis kode.
+		WarRoomRentang:             getEnv("WARROOM_RENTANG", "today"),
 		WarRoomTargetBiayaPerHasil: getEnvFloat("WARROOM_TARGET_BIAYA_PER_HASIL", 150000),
 		WarRoomFrekuensiMaks:       getEnvFloat("WARROOM_FREKUENSI_MAKS", 3),
 		WarRoomCTRMinPersen:        getEnvFloat("WARROOM_CTR_MIN_PERSEN", 1),
