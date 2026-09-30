@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,11 +42,13 @@ func layananKonten(t *testing.T, s sumberUji, konten HitungKonten) *WarRoomServi
 // kampanye merakit satu baris kampanye metaapi dengan angka yang ikut
 // menentukan penilaian; sisanya (impresi, klik, jangkauan) diisi nilai wajar
 // karena tidak satu pun uji di berkas ini bergantung padanya.
-func kampanye(id, nama, akun string, belanja, hasil, ctr, frek float64) KampanyeMentah {
+// proyekID = tanda proyek kampanyenya; 0 berarti belum ditandai.
+func kampanye(id, nama, akun string, proyekID int, belanja, hasil, ctr, frek float64) KampanyeMentah {
 	return KampanyeMentah{
 		ID: id, Name: nama, Account: akun, AccountID: akun,
 		Status: "ACTIVE", EffectiveStatus: "ACTIVE",
-		Spend: belanja, Results: hasil, CTR: ctr, Frequency: frek,
+		ProjectID: proyekID,
+		Spend:     belanja, Results: hasil, CTR: ctr, Frequency: frek,
 		Impressions: 10000, Clicks: 100, Reach: 5000,
 	}
 }
@@ -53,18 +56,18 @@ func kampanye(id, nama, akun string, belanja, hasil, ctr, frek float64) Kampanye
 func iklanUji() IklanMentah {
 	m := IklanMentah{Configured: true}
 	// Boros: 1 juta tanpa satu pun hasil (jauh di atas ambang belajar 300rb).
-	m.Campaigns = append(m.Campaigns, kampanye("c1", "Hardsell Mawar", "akun-a", 1_000_000, 0, 1.5, 2))
+	m.Campaigns = append(m.Campaigns, kampanye("c1", "Hardsell Mawar", "akun-a", 8, 1_000_000, 0, 1.5, 2))
 	// Sehat: 10 hasil dengan biaya 50rb, di bawah target 100rb.
-	m.Campaigns = append(m.Campaigns, kampanye("c2", "Reels Melati", "akun-b", 500_000, 10, 2.0, 1.5))
+	m.Campaigns = append(m.Campaigns, kampanye("c2", "Reels Melati", "akun-b", 7, 500_000, 10, 2.0, 1.5))
 	// Baru jalan: 100rb, belum pantas dinilai.
-	m.Campaigns = append(m.Campaigns, kampanye("c3", "Uji Kreatif Baru", "akun-a", 100_000, 0, 1.2, 1))
+	m.Campaigns = append(m.Campaigns, kampanye("c3", "Uji Kreatif Baru", "akun-a", 8, 100_000, 0, 1.2, 1))
 	return m
 }
 
 func proyekUji() []ProyekMeta {
 	return []ProyekMeta{
-		{ID: 7, Name: "GP Mawar", Accounts: []AkunProyekMeta{{Kind: "ad", Ref: "akun-b"}, {Kind: "wa", Ref: "wa1"}}},
-		{ID: 8, Name: "GP Melati", Accounts: []AkunProyekMeta{{Kind: "ad", Ref: "akun-a"}}},
+		{ID: 7, Name: "GP Mawar", GP: "GP1", Accounts: []AkunProyekMeta{{Kind: "wa", Ref: "wa1"}}},
+		{ID: 8, Name: "GP Melati", GP: "GP2"},
 	}
 }
 
@@ -135,10 +138,14 @@ func TestLingkupProyekMemakaiRumusYangSama(t *testing.T) {
 	}
 }
 
-// TestBelanjaPerProyekDariPetaAkun: tanpa data Sales, perbandingan antar proyek
-// bersandar pada peta proyek→akun iklan. Kalau pemetaan ini salah dibaca,
+// TestBelanjaPerProyekDariTandaKampanye: perbandingan antar proyek bersandar pada
+// TANDA PROYEK tiap kampanye, bukan pada peta proyek→akun iklan.
+//
+// Peta akun tidak pernah bisa menjawabnya: satu akun iklan berisi kampanye dari
+// banyak proyek sekaligus, jadi belanjanya tidak bisa dibelah ke pemiliknya —
+// dan panel ini memajang Rp 0 untuk SEMUA baris. Kalau atribusi ini salah dibaca,
 // usulan "alihkan budget dari A ke B" akan menunjuk proyek yang keliru.
-func TestBelanjaPerProyekDariPetaAkun(t *testing.T) {
+func TestBelanjaPerProyekDariTandaKampanye(t *testing.T) {
 	s := sumberUji{
 		iklan:  iklanUji(),
 		proyek: proyekUji(),
@@ -148,17 +155,109 @@ func TestBelanjaPerProyekDariPetaAkun(t *testing.T) {
 	if len(w.Proyek) != 2 {
 		t.Fatalf("proyek = %d, mau 2", len(w.Proyek))
 	}
-	// Urut dari belanja terbesar: akun-a (1,1 juta) sebelum akun-b (500rb).
+	// Urut dari belanja terbesar: GP Melati (c1+c3 = 1,1 juta) sebelum GP Mawar (500rb).
 	if w.Proyek[0].Nama != "GP Melati" || w.Proyek[0].Belanja != 1_100_000 || w.Proyek[0].Kampanye != 2 {
 		t.Fatalf("proyek teratas = %+v, mau GP Melati 1.100.000 dari 2 kampanye", w.Proyek[0])
 	}
 	if w.Proyek[1].Nama != "GP Mawar" || w.Proyek[1].BiayaPerHasil != 50000 {
 		t.Fatalf("proyek kedua = %+v, mau GP Mawar biaya per hasil 50.000", w.Proyek[1])
 	}
-	// Proyek yang tidak punya akun iklan sama sekali tetap muncul dengan nol —
-	// hilang dari daftar akan membuatnya tak pernah ditanyakan.
+	// GP ikut di setiap baris, supaya layar bisa mengelompokkan tanpa mencocokkan
+	// ulang ke peta proyek — dua pencocokan atas data yang sama pada akhirnya
+	// berselisih.
+	if w.Proyek[0].GP != "GP2" || w.Proyek[1].GP != "GP1" {
+		t.Fatalf("GP tidak terbawa ke baris proyek: %+v", w.Proyek)
+	}
 	if w.Proyek[0].Kampanye+w.Proyek[1].Kampanye != 3 {
-		t.Fatalf("seluruh kampanye harus terbagi ke proyeknya: %+v", w.Proyek)
+		t.Fatalf("seluruh kampanye bertanda harus terbagi ke proyeknya: %+v", w.Proyek)
+	}
+}
+
+// TestKampanyeTanpaTandaTidakIkutDijumlah mengunci aturan pemilik repo: hanya
+// kampanye yang SUDAH DITANDAI proyeknya yang masuk War Room.
+//
+// Yang belum ditandai tidak ditebak dari awalan namanya. Nama kampanye diketik
+// manusia; satu salah ketik akan memindahkan belanja ke proyek lain tanpa ada
+// yang tahu, dan angka yang dipakai mengambil keputusan ikut bergeser diam-diam.
+//
+// Tapi ia juga tidak boleh hilang tanpa jejak: tanda yang belum dipasang adalah
+// pekerjaan yang belum dikerjakan orang, dan satu-satunya cara ia selesai adalah
+// kalau angkanya terpampang di layar yang sama.
+func TestKampanyeTanpaTandaTidakIkutDijumlah(t *testing.T) {
+	m := IklanMentah{Configured: true}
+	m.Campaigns = append(m.Campaigns,
+		kampanye("t1", "Sudah ditandai", "akun-a", 7, 1_000_000, 20, 2.0, 1.5),
+		kampanye("t2", "ZHL 2 - HS 2 Sales", "akun-a", 0, 3_000_000, 9, 1.0, 2),
+	)
+	svc := NewWarRoomService(nil, nil, nil, WRAturan{BiayaPerHasilTarget: 100000}, "30d")
+	out, boros, _ := svc.hitungIklan(m, lingkupBerlaku{})
+
+	if out.Belanja != 1_000_000 || out.Hasil != 20 || out.KampanyeAktif != 1 {
+		t.Fatalf("hanya kampanye bertanda yang dijumlah, dapat belanja=%v hasil=%v aktif=%d",
+			out.Belanja, out.Hasil, out.KampanyeAktif)
+	}
+	if out.KampanyeTanpaTanda != 1 || out.BelanjaTanpaTanda != 3_000_000 {
+		t.Fatalf("yang belum bertanda harus dilaporkan terpisah: %d kampanye, belanja %v",
+			out.KampanyeTanpaTanda, out.BelanjaTanpaTanda)
+	}
+	for _, k := range boros {
+		if k.ID == "t2" {
+			t.Fatal("kampanye tanpa tanda tidak boleh masuk daftar yang bisa ditindaklanjuti")
+		}
+	}
+}
+
+// TestKampanyeMatiTanpaTandaDihitungSebagaiMati menjaga urutan kedua saringan.
+//
+// Yang sudah dimatikan diperiksa LEBIH DULU. Kalau tandanya diperiksa lebih dulu,
+// "belanja tanpa tanda" akan menggelembung dengan uang kampanye yang sudah tidak
+// berjalan — lalu mengirim orang menandai kampanye yang sudah tidak bisa
+// diapa-apakan lagi.
+func TestKampanyeMatiTanpaTandaDihitungSebagaiMati(t *testing.T) {
+	m := IklanMentah{Configured: true}
+	mati := kampanye("m1", "Mati dan belum ditandai", "akun-a", 0, 2_000_000, 4, 1.0, 2)
+	mati.EffectiveStatus = "CAMPAIGN_PAUSED"
+	m.Campaigns = append(m.Campaigns, mati)
+
+	svc := NewWarRoomService(nil, nil, nil, WRAturan{BiayaPerHasilTarget: 100000}, "30d")
+	out, _, _ := svc.hitungIklan(m, lingkupBerlaku{})
+
+	if out.KampanyeNonAktif != 1 || out.BelanjaNonAktif != 2_000_000 {
+		t.Fatalf("harus terhitung sebagai non-aktif: %d / %v", out.KampanyeNonAktif, out.BelanjaNonAktif)
+	}
+	if out.KampanyeTanpaTanda != 0 || out.BelanjaTanpaTanda != 0 {
+		t.Fatalf("tidak boleh dihitung dua kali sebagai tanpa tanda: %d / %v",
+			out.KampanyeTanpaTanda, out.BelanjaTanpaTanda)
+	}
+}
+
+// TestLingkupGPMenyaringSekelompokProyek: GP adalah lingkup teratas layar ini —
+// satu chip yang mencakup beberapa proyek sekaligus.
+func TestLingkupGPMenyaringSekelompokProyek(t *testing.T) {
+	svc := layananUji(t, sumberUji{iklan: iklanUji(), proyek: proyekUji()})
+	w := svc.Susun(context.Background(), "tok", WRLingkup{GP: "GP2"})
+
+	if w.Lingkup.GP != "GP2" || w.Lingkup.Nama != "GP2" {
+		t.Fatalf("lingkup = %+v, mau GP2", w.Lingkup)
+	}
+	// GP2 hanya berisi GP Melati: c1 (1jt) + c3 (100rb).
+	if w.Iklan.Belanja != 1_100_000 {
+		t.Fatalf("belanja GP2 = %v, mau 1.100.000", w.Iklan.Belanja)
+	}
+	if len(w.Proyek) != 1 || w.Proyek[0].Nama != "GP Melati" {
+		t.Fatalf("daftar proyek = %+v, mau hanya GP Melati", w.Proyek)
+	}
+	// Ejaan GP diambil dari data, bukan dari query: chip harus tetap terbaca "GP2"
+	// walau orang mengetik "gp2" di alamatnya.
+	w = svc.Susun(context.Background(), "tok", WRLingkup{GP: "gp2"})
+	if w.Lingkup.GP != "GP2" {
+		t.Fatalf("ejaan GP harus diambil dari data, dapat %q", w.Lingkup.GP)
+	}
+	// Chip GP disusun dari proyek yang lolos pemilih, bukan dari seluruh peta —
+	// chip yang ketika ditekan menghasilkan layar kosong lebih buruk daripada
+	// chip yang tidak ada.
+	if len(w.GpTersedia) != 2 || w.GpTersedia[0] != "GP1" || w.GpTersedia[1] != "GP2" {
+		t.Fatalf("chip GP = %+v, mau [GP1 GP2] urut", w.GpTersedia)
 	}
 }
 
@@ -290,51 +389,88 @@ func (s *sumberHitung) IklanRinci(context.Context, string) (IklanRinciMentah, er
 }
 func (s *sumberHitung) ProyekMeta(context.Context, string) ([]ProyekMeta, error) { return nil, nil }
 
-// TestChipLingkupHanyaProyekBerakunMeta: peta proyek di metaapi memuat DUA jenis
-// baris — proyek jualan, dan wadah tim pelaksana yang dinamai bebas seperti
-// "Team SPV 1". Tanpa saringan, chip LINGKUP meminta orang di ruang rapat
+// TestChipLingkupHanyaProyekBertandaAtauBerakun: peta proyek di metaapi memuat DUA
+// jenis baris — proyek jualan, dan wadah tim pelaksana yang dinamai bebas seperti
+// "Team SPV 1". Tanpa saringan, pemilih LINGKUP meminta orang di ruang rapat
 // memilih "Team SPV 2" sebagai lingkup angka iklan — pilihan yang tidak berarti
 // apa-apa.
 //
-// Penandanya AKUN META, bukan anggota sales: di data nyata keempat baris punya
-// tepat satu orang sales, termasuk ketiga wadah tim, jadi sales tidak memisahkan
-// apa pun.
-func TestChipLingkupHanyaProyekBerakunMeta(t *testing.T) {
+// Penandanya KAMPANYE BERTANDA atau akun Meta, bukan nama dan bukan anggota sales:
+// di data nyata keempat baris punya tepat satu orang sales, termasuk ketiga wadah
+// tim, jadi sales tidak memisahkan apa pun.
+func TestChipLingkupHanyaProyekBertandaAtauBerakun(t *testing.T) {
+	kampanyeUji := []KampanyeMentah{
+		kampanye("k1", "Hardsell Mawar", "akun-b", 7, 500_000, 3, 1.5, 2),
+	}
 	pilih := pilihanProyek([]ProyekMeta{
-		// Wadah tim: punya sales, tapi nol akun Meta. Persis bentuk data nyata.
+		// Wadah tim: punya sales, tapi nol akun Meta dan nol kampanye bertanda.
+		// Persis bentuk data nyata.
 		{ID: 9, Name: "Team SPV 1", Sales: []SalesProyekMeta{{Email: "s1@x.id"}}},
-		{ID: 7, Name: "GP Mawar", Sales: []SalesProyekMeta{{Email: "a@x.id"}},
-			Accounts: []AkunProyekMeta{{Kind: "ad", Ref: "akun-b"}}},
+		{ID: 7, Name: "GP Mawar", GP: "GP1", Sales: []SalesProyekMeta{{Email: "a@x.id"}}},
 		{ID: 10, Name: "Team SPV 2", Sales: []SalesProyekMeta{{Email: "s2@x.id"}}},
-		// WA/IG saja sudah cukup — lihat alasannya di pilihanProyek().
-		{ID: 8, Name: "GP Melati", Accounts: []AkunProyekMeta{{Kind: "wa", Ref: "wa1"}}},
-	})
+		// Akun WA/IG saja sudah cukup meski belum ada kampanye bertanda: proyek yang
+		// hilang dari pemilih terbaca sebagai layar rusak, sedangkan proyek yang ada
+		// dengan "0 kampanye" terbaca sebagai pekerjaan yang belum selesai.
+		{ID: 8, Name: "GP Melati", GP: "GP2", Accounts: []AkunProyekMeta{{Kind: "wa", Ref: "wa1"}}},
+	}, kampanyeUji)
+
 	if len(pilih) != 2 {
-		t.Fatalf("chip lingkup = %+v, mau hanya dua proyek berakun Meta", pilih)
+		t.Fatalf("pemilih lingkup = %+v, mau hanya dua proyek", pilih)
 	}
 	for _, p := range pilih {
 		if p.Nama == "Team SPV 1" || p.Nama == "Team SPV 2" {
-			t.Fatalf("wadah tim pelaksana ikut jadi chip lingkup: %+v", pilih)
+			t.Fatalf("wadah tim pelaksana ikut jadi pilihan lingkup: %+v", pilih)
 		}
 	}
-	// Urut nama, supaya posisi chip tidak berpindah-pindah antar pembacaan.
+	// Urut nama, supaya posisinya tidak berpindah-pindah antar pembacaan.
 	if pilih[0].Nama != "GP Mawar" || pilih[1].Nama != "GP Melati" {
-		t.Fatalf("urutan chip tidak stabil: %+v", pilih)
+		t.Fatalf("urutan pilihan tidak stabil: %+v", pilih)
+	}
+	// Jumlah kampanye bertanda ikut, supaya proyek yang belum ditandai bisa
+	// disebut apa adanya alih-alih disembunyikan.
+	if pilih[0].Kampanye != 1 || pilih[1].Kampanye != 0 {
+		t.Fatalf("jumlah kampanye bertanda salah: %+v", pilih)
+	}
+	if pilih[0].GP != "GP1" || pilih[1].GP != "GP2" {
+		t.Fatalf("GP tidak terbawa ke pilihan: %+v", pilih)
 	}
 }
 
-// TestChipLingkupTidakPernahKosong menjaga jalur cadangannya. Akun Meta ditautkan
-// belakangan lewat menu Akun Meta, jadi peta yang belum dilengkapi akan
-// menyusutkan pemilih lingkup jadi satu tombol "Semua proyek" — kontrol yang
-// rusak, dan yang melihatnya akan menyangka layarnya gagal memuat, bukan datanya
-// yang belum ada.
-func TestChipLingkupTidakPernahKosong(t *testing.T) {
-	pilih := pilihanProyek([]ProyekMeta{
+// TestPemilihKosongLebihBaikDaripadaWadahTim mengunci sebuah perubahan sikap yang
+// disengaja.
+//
+// Dulu daftar kosong diganti "tampilkan semua proyek", supaya pemilih tidak
+// menyusut jadi satu tombol yang terbaca sebagai layar rusak. Di produksi
+// cadangan itu justru menghidupkan kembali apa yang disaring: TIDAK SATU PUN dari
+// keempat proyek punya akun iklan tertaut, jadi saringannya menyisakan daftar
+// kosong, cadangannya jalan, dan "Team SPV" muncul lagi di layar yang sudah
+// "dibetulkan" — dua kali, dua deploy.
+//
+// Jadi sekarang: daftarnya benar-benar kosong, dan alasannya dituliskan sebagai
+// celah data yang menyebut apa yang harus dikerjakan. Keterangan yang bisa
+// ditindaklanjuti mengalahkan daftar yang tampak penuh tapi salah.
+func TestPemilihKosongLebihBaikDaripadaWadahTim(t *testing.T) {
+	proyek := []ProyekMeta{
 		{ID: 9, Name: "Team SPV 1"},
 		{ID: 10, Name: "Team SPV 2"},
-	})
-	if len(pilih) != 2 {
-		t.Fatalf("tanpa satu pun akun Meta, saringan harus dilepas: %+v", pilih)
+	}
+	if pilih := pilihanProyek(proyek, nil); len(pilih) != 0 {
+		t.Fatalf("tanpa kampanye bertanda dan tanpa akun Meta, pemilih harus kosong: %+v", pilih)
+	}
+
+	w := layananUji(t, sumberUji{iklan: IklanMentah{Configured: true}, proyek: proyek}).
+		Susun(context.Background(), "tok", WRLingkup{})
+	if len(w.ProyekTersedia) != 0 {
+		t.Fatalf("pemilih = %+v, mau kosong", w.ProyekTersedia)
+	}
+	ada := false
+	for _, c := range w.CelahData {
+		if strings.Contains(c, "tandai") {
+			ada = true
+		}
+	}
+	if !ada {
+		t.Fatalf("pemilih kosong harus disertai celah data yang menyebut jalan keluarnya: %+v", w.CelahData)
 	}
 }
 
@@ -347,13 +483,13 @@ func TestChipLingkupTidakPernahKosong(t *testing.T) {
 // yang sebagian miliknya kampanye yang sudah tidak ada.
 func TestHanyaKampanyeAktifYangDihitung(t *testing.T) {
 	m := IklanMentah{Configured: true}
-	aktif := kampanye("a1", "Masih jalan", "akun-a", 1_000_000, 20, 2.0, 1.5)
-	mati := kampanye("a2", "Sudah dimatikan", "akun-a", 4_000_000, 5, 0.5, 3)
+	aktif := kampanye("a1", "Masih jalan", "akun-a", 7, 1_000_000, 20, 2.0, 1.5)
+	mati := kampanye("a2", "Sudah dimatikan", "akun-a", 7, 4_000_000, 5, 0.5, 3)
 	mati.EffectiveStatus = "CAMPAIGN_PAUSED"
 	m.Campaigns = append(m.Campaigns, aktif, mati)
 
 	svc := NewWarRoomService(nil, nil, nil, WRAturan{BiayaPerHasilTarget: 100000}, "30d")
-	out, _, _ := svc.hitungIklan(m, saringan{})
+	out, _, _ := svc.hitungIklan(m, lingkupBerlaku{})
 
 	if out.Belanja != 1_000_000 {
 		t.Fatalf("belanja = %v, mau 1jt (hanya yang aktif)", out.Belanja)
@@ -378,7 +514,7 @@ func TestHanyaKampanyeAktifYangDihitung(t *testing.T) {
 // ADSET_PAUSED — ia tidak tayang, tapi kolom status miliknya sendiri tidak
 // pernah berubah. Memakai `status` akan menghitungnya sebagai aktif selamanya.
 func TestEffectiveStatusMengalahkanStatus(t *testing.T) {
-	c := kampanye("x", "Adset dimatikan", "akun-a", 500_000, 3, 1.0, 1)
+	c := kampanye("x", "Adset dimatikan", "akun-a", 7, 500_000, 3, 1.0, 1)
 	c.Status = "ACTIVE"
 	c.EffectiveStatus = "ADSET_PAUSED"
 	if kampanyeAktif(c) {

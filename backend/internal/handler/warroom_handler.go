@@ -40,14 +40,14 @@ func bearer(c *gin.Context) string {
 	return ""
 }
 
-// Muatan melayani GET /api/warroom?proyek_id=
+// Muatan melayani GET /api/warroom?gp=&proyek_id=
 //
 // Selalu 200 selama pemanggilnya sah: sumber yang mati muncul sebagai dimensi
 // abu beserta alasannya di celah_data, bukan sebagai layar galat. War room yang
 // padam karena satu layanan ngambek akan ditinggalkan orang justru pada hari
 // ketika ia paling dibutuhkan.
 func (h *WarRoomHandler) Muatan(c *gin.Context) {
-	wr := h.svc.Susun(c.Request.Context(), bearer(c), service.WRLingkup{ProyekID: c.Query("proyek_id")})
+	wr := h.svc.Susun(c.Request.Context(), bearer(c), service.WRLingkup{GP: c.Query("gp"), ProyekID: c.Query("proyek_id")})
 	c.JSON(http.StatusOK, wr)
 }
 

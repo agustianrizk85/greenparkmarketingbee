@@ -41,6 +41,7 @@ type WarRoom struct {
 	TanggalData     string             `json:"tanggal_data"` // RFC3339
 	Lingkup         WRLingkupMeta      `json:"lingkup"`
 	ProyekTersedia  []WRPilihan        `json:"proyek_tersedia"`
+	GpTersedia      []string           `json:"gp_tersedia"`
 	Aturan          WRAturan           `json:"aturan"`
 	StatusSistem    WRStatus           `json:"status_sistem"`
 	Iklan           WRIklan            `json:"iklan"`
@@ -58,7 +59,12 @@ type WarRoom struct {
 }
 
 // WRLingkup adalah penyaring yang diminta pemanggil.
+//
+// Dua tingkat, dan keduanya berdiri sendiri: GP menyaring sekelompok proyek,
+// ProyekID menyaring satu proyek. Kalau keduanya diisi, ProyekID yang menang —
+// pilihan yang lebih sempit adalah yang baru saja ditekan orangnya.
 type WRLingkup struct {
+	GP       string
 	ProyekID string
 }
 
@@ -66,13 +72,22 @@ type WRLingkup struct {
 // memakai ini untuk judul, dan AI memakainya untuk menyebut cakupan briefing.
 type WRLingkupMeta struct {
 	ProyekID string `json:"proyek_id"`
+	GP       string `json:"gp"`
 	Nama     string `json:"nama"`
 }
 
-// WRPilihan adalah satu pilihan lingkup.
+// WRPilihan adalah satu pilihan lingkup: satu proyek, beserta GP-nya dan jumlah
+// kampanye yang sudah ditandai untuknya.
+//
+// Kampanye ikut dikirim supaya pemilih bisa menyebut proyek yang belum punya
+// kampanye bertanda apa adanya, alih-alih menyembunyikannya. Proyek yang hilang
+// dari pemilih terbaca sebagai layar rusak; proyek yang ada dengan keterangan
+// "belum ada kampanye bertanda" terbaca sebagai pekerjaan yang belum selesai.
 type WRPilihan struct {
-	ID   string `json:"id"`
-	Nama string `json:"nama"`
+	ID       string `json:"id"`
+	Nama     string `json:"nama"`
+	GP       string `json:"gp"`
+	Kampanye int    `json:"kampanye"`
 }
 
 // WRAturan adalah ambang yang dipakai menilai warna. Ikut dikirim ke AI, bukan
@@ -129,6 +144,16 @@ type WRIklan struct {
 	// membandingkan dua layar akan mengira salah satunya rusak.
 	KampanyeNonAktif int     `json:"kampanye_non_aktif"`
 	BelanjaNonAktif  float64 `json:"belanja_non_aktif"`
+
+	// Kampanye yang BELUM DITANDAI proyeknya, dan uang yang sudah dipakainya.
+	//
+	// Sama alasannya dengan pasangan non-aktif di atas, dan lebih penting: yang
+	// belum ditandai bukan kesalahan Meta melainkan pekerjaan yang belum
+	// dikerjakan orang, dan satu-satunya cara ia selesai adalah kalau angkanya
+	// terpampang. Disembunyikan, belanja yang tak teratribusi akan tinggal
+	// bertahun-tahun tanpa ada yang menyadarinya.
+	KampanyeTanpaTanda int     `json:"kampanye_tanpa_tanda"`
+	BelanjaTanpaTanda  float64 `json:"belanja_tanpa_tanda"`
 }
 
 // WRKampanye adalah satu kampanye beserta alasan ia masuk daftar.
@@ -143,6 +168,16 @@ type WRKampanye struct {
 	CTR           float64 `json:"ctr"`
 	Frekuensi     float64 `json:"frekuensi"`
 	Masalah       string  `json:"masalah"`
+	// Proyek pemilik kampanye ini, dari tanda yang dipasang orang di halaman Iklan.
+	//
+	// Dulu tidak dikirim, dan layar mencatatnya sebagai celah yang disengaja:
+	// "rincian kampanye per proyek belum dikirim backend". Sebabnya bukan lupa —
+	// atribusinya waktu itu bersandar pada akun iklan, dan satu akun berisi
+	// kampanye dari banyak proyek, jadi tidak ada jawaban yang benar untuk dikirim.
+	// Dengan tanda per kampanye jawabannya ada, dan laci "proyek → kampanye" tidak
+	// perlu lagi menebak dari nama.
+	ProyekID string `json:"proyek_id"`
+	Proyek   string `json:"proyek"`
 	// DiBawahAmbangBelajar = belanjanya belum cukup untuk dinilai. Dikirim
 	// eksplisit supaya AI tidak perlu menghitung sendiri untuk menuruti larangan
 	// "jangan hentikan kampanye di bawah ambang belajar".
@@ -216,6 +251,7 @@ type WROrang struct {
 type WRProyek struct {
 	ID            string  `json:"id"`
 	Nama          string  `json:"nama"`
+	GP            string  `json:"gp"`
 	Belanja       float64 `json:"belanja"`
 	Hasil         float64 `json:"hasil"`
 	BiayaPerHasil float64 `json:"biaya_per_hasil"`
@@ -281,6 +317,20 @@ type KampanyeMentah struct {
 	EffectiveStatus string  `json:"effectiveStatus"`
 	Issues          int     `json:"issues"`
 	IssueSummary    string  `json:"issueSummary"`
+
+	// Atribusi proyek, distempel metaapi dari tanda per kampanye.
+	//
+	// ProjectID 0 berarti kampanyenya BELUM ditandai, dan layar ini memang
+	// menyisihkannya — bukan menebaknya dari awalan nama. Nama kampanye diketik
+	// manusia: satu salah ketik akan memindahkan belanja ke proyek lain tanpa ada
+	// yang tahu, dan angka rapat ikut bergeser diam-diam.
+	//
+	// ProjectName dan GP ikut dikirim supaya baris "Belanja per proyek" tidak
+	// perlu mencocokkan ulang ke peta proyek; keduanya berasal dari proyeknya,
+	// jadi tidak bisa berselisih dengan ProjectID.
+	ProjectID   int    `json:"projectId"`
+	ProjectName string `json:"projectName"`
+	GP          string `json:"gp"`
 }
 
 // IklanMentah = /api/meta/ads milik metaapi.
@@ -340,8 +390,11 @@ type SalesProyekMeta struct {
 
 // ProyekMeta = /api/meta/projects — peta proyek ke akun iklan/WA/IG dan timnya.
 type ProyekMeta struct {
-	ID       int               `json:"id"`
-	Name     string            `json:"name"`
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	// GP = grup proyek ("GP1", "GP2"…), lingkup teratas di layar ini. Sumbernya
+	// satu: kolom `gp` pada proyek di metaapi, ejaan yang sama dengan legalpermit.
+	GP       string            `json:"gp"`
 	Accounts []AkunProyekMeta  `json:"accounts"`
 	Sales    []SalesProyekMeta `json:"sales"`
 }
