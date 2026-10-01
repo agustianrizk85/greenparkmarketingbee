@@ -9,7 +9,6 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
-	github.com/segmentio/kafka-go v0.4.51
 	github.com/xuri/excelize/v2 v2.10.1
 	golang.org/x/crypto v0.48.0
 	golang.org/x/oauth2 v0.36.0
@@ -17,8 +16,11 @@ require (
 	gorm.io/gorm v1.25.12
 )
 
+require github.com/segmentio/kafka-go v0.4.51 // indirect
+
 require (
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect
+	github.com/agustianrizk85/greenpark-shared v0.0.0
 	github.com/bytedance/sonic v1.11.6 // indirect
 	github.com/bytedance/sonic/loader v0.1.1 // indirect
 	github.com/cloudwego/base64x v0.1.4 // indirect
@@ -69,3 +71,5 @@ require (
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
+
+replace github.com/agustianrizk85/greenpark-shared => ../../greenpark-shared

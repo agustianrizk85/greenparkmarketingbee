@@ -18,6 +18,8 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+
+	"github.com/agustianrizk85/greenpark-shared/kafka"
 )
 
 // NewRouter wires repositories, services, handlers and routes together.
@@ -87,22 +89,36 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	contentPlanH := NewContentPlanHandler(contentPlanSvc, sheetsClient, cfg.ContentSheetID, hub)
 	contentPlanH.StartAutoSync(context.Background())
 
-	// metaapi → Kafka → sini → soket → layar. Tiap tulis sukses di metaapi
-	// (kampanye ditandai proyeknya, akun Meta disambungkan, tanda dilepas)
-	// memancarkan `gp.meta.data`; di sini ia membuang singgahan War Room LALU
-	// membunyikan hub.
+	// metaapi → Kafka → sini → soket → layar.
 	//
-	// URUTANNYA MENENTUKAN. Membunyikan hub lebih dulu membuat layar membaca
-	// ulang dan menerima muatan lama yang masih tersimpan — terlihat seperti
-	// realtime yang tidak bekerja, padahal yang rusak temboloknya. Dibuang dulu,
-	// pembacaan yang dipicu dorongan itu menghitung dari awal.
+	// Tiap tulis sukses di metaapi (kampanye ditandai proyeknya, akun Meta
+	// disambungkan, tanda dilepas) memancarkan `gp.meta.data` lewat middleware
+	// EmitOnWriteGin. Tanpa konsumen ini layar baru berubah pada polling
+	// berikutnya — sampai satu menit, dan di layar rapat jeda itu terbaca
+	// sebagai "datanya tidak masuk".
 	//
-	// Tanpa KAFKA_BROKERS konsumennya tidak menyala dan layar tetap mengandalkan
-	// polling 60 detik: angkanya tetap benar, hanya terlambat.
-	MulaiKonsumenMeta(func() {
-		warroomSvc.BuangSinggahan()
-		hub.Bump()
-	})
+	// URUTANNYA MENENTUKAN: buang singgahan DULU, baru bunyikan hub. Terbalik,
+	// layar membaca ulang lalu menerima muatan lama yang masih tersimpan —
+	// terlihat seperti realtime yang tidak bekerja, padahal yang rusak
+	// temboloknya. Singgahan dibuang SELURUHNYA: satu kampanye yang berpindah
+	// proyek mengubah angka di lingkup lamanya, lingkup barunya, GP keduanya,
+	// dan "semua proyek" sekaligus.
+	//
+	// Hanya topik META yang didengarkan, bukan OtherDataTopics(): War Room
+	// Marketing membaca metaapi saja. Berlangganan seluruh divisi akan
+	// membunyikan hub tiap kali Teknik atau Sales menulis apa pun, dan layar
+	// memuat ulang tanpa satu angka pun berubah.
+	//
+	// KAFKA_BROKERS kosong/"off" = backbone mati, Start() jadi no-op, dan layar
+	// kembali mengandalkan polling: angkanya tetap benar, hanya terlambat.
+	kafka.NewConsumer(
+		kafka.AutoConfig(kafka.SourceMarketing),
+		[]string{kafka.DataTopic(kafka.SourceMeta)},
+		kafka.BumpOn(func() {
+			warroomSvc.BuangSinggahan()
+			hub.Bump()
+		}),
+	).Start()
 
 	r := gin.Default()
 	r.MaxMultipartMemory = 32 << 20 // 32 MiB
