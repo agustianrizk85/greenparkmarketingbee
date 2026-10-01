@@ -226,46 +226,6 @@ func gnum(m map[string]any, k string) float64 {
 	return 0
 }
 
-func spendOf(a map[string]any) float64 {
-	switch v := a["amount_spent"].(type) {
-	case string:
-		f, _ := strconv.ParseFloat(v, 64)
-		return f
-	case float64:
-		return v
-	}
-	return 0
-}
-
-// pickAccount returns the account to detail: the pinned id when set (matched
-// with or without the act_ prefix), otherwise the highest-spend account so an
-// empty/test account is never the default. Returns nil when a pinned id is set
-// but not present in the list (caller then reads it directly).
-func pickAccount(list []any, pinned string) map[string]any {
-	pin := pinned
-	if pin != "" && (len(pin) < 4 || pin[:4] != "act_") {
-		pin = "act_" + pin
-	}
-	var best map[string]any
-	bestSpend := -1.0
-	for _, it := range list {
-		a, _ := it.(map[string]any)
-		if a == nil {
-			continue
-		}
-		if pin != "" && gstr(a, "id") == pin {
-			return a
-		}
-		if s := spendOf(a); s > bestSpend {
-			bestSpend, best = s, a
-		}
-	}
-	if pinned != "" {
-		return nil
-	}
-	return best
-}
-
 // Ads — the most complete pull in one call: every accessible ad account with
 // its 30-day summary, plus a full per-campaign breakdown (spend / result /
 // cost-per-result / CTR / CPC) across all accounts, results parsed from the
@@ -452,22 +412,6 @@ func (h *MetaHandler) Ads(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
-// primaryAccountID resolves the ad account to break down: the pinned one, else
-// the highest-spend account the token can see.
-func (mc metaClient) primaryAccountID() string {
-	if mc.adAccount != "" {
-		if strings.HasPrefix(mc.adAccount, "act_") {
-			return mc.adAccount
-		}
-		return "act_" + mc.adAccount
-	}
-	acc, _ := mc.graph("/me/adaccounts", map[string]string{"fields": "id,amount_spent", "limit": "100"})
-	if a := pickAccount(dataList(acc), ""); a != nil {
-		return gstr(a, "id")
-	}
-	return ""
-}
-
 // insightRows fetches insights rows with the standard metric fields + actions.
 func (mc metaClient) insightRows(act string, params map[string]string) []map[string]any {
 	base := map[string]string{"date_preset": "last_30d", "limit": "500", "fields": "spend,impressions,clicks,ctr,actions"}
@@ -483,24 +427,6 @@ func (mc metaClient) insightRows(act string, params map[string]string) []map[str
 		if m, ok := it.(map[string]any); ok {
 			out = append(out, m)
 		}
-	}
-	return out
-}
-
-// mapBreakdown turns insight rows into compact {label, spend, results, ...} and
-// sorts by spend desc, keeping the top `limit` (0 = all).
-func mapBreakdown(rows []map[string]any, label func(map[string]any) string, limit int) []gin.H {
-	out := make([]gin.H, 0, len(rows))
-	for _, r := range rows {
-		_, res := resultFromActions(r)
-		out = append(out, gin.H{
-			"label": label(r), "spend": gnum(r, "spend"), "impressions": gnum(r, "impressions"),
-			"clicks": gnum(r, "clicks"), "ctr": gnum(r, "ctr"), "results": res,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i]["spend"].(float64) > out[j]["spend"].(float64) })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
 	}
 	return out
 }

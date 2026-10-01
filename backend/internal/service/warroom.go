@@ -270,6 +270,23 @@ func (s *WarRoomService) dariSinggahan(l WRLingkup, now time.Time) (WarRoom, boo
 	return c.wr, true
 }
 
+// BuangSinggahan mengosongkan seluruh muatan tersimpan.
+//
+// Dipanggil saat metaapi mengabarkan datanya berubah (lihat KonsumenMeta).
+// TANPA ini, dorongan soket cuma membuat layar membaca ulang lalu menerima
+// muatan lama yang sama persis — terlihat seperti realtime yang tidak bekerja,
+// padahal yang rusak temboloknya.
+//
+// Dibuang SELURUHNYA, bukan per lingkup: satu kampanye yang berpindah proyek
+// mengubah angka di lingkup lamanya, lingkup barunya, GP keduanya, dan "semua
+// proyek" sekaligus. Menebak lingkup mana yang terpengaruh akan menyisakan satu
+// layar yang diam-diam basi.
+func (s *WarRoomService) BuangSinggahan() {
+	s.mu.Lock()
+	s.singgahan = map[string]singgahan{}
+	s.mu.Unlock()
+}
+
 func (s *WarRoomService) simpanSinggahan(l WRLingkup, wr WarRoom, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

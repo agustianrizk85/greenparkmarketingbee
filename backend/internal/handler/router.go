@@ -87,6 +87,23 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	contentPlanH := NewContentPlanHandler(contentPlanSvc, sheetsClient, cfg.ContentSheetID, hub)
 	contentPlanH.StartAutoSync(context.Background())
 
+	// metaapi → Kafka → sini → soket → layar. Tiap tulis sukses di metaapi
+	// (kampanye ditandai proyeknya, akun Meta disambungkan, tanda dilepas)
+	// memancarkan `gp.meta.data`; di sini ia membuang singgahan War Room LALU
+	// membunyikan hub.
+	//
+	// URUTANNYA MENENTUKAN. Membunyikan hub lebih dulu membuat layar membaca
+	// ulang dan menerima muatan lama yang masih tersimpan — terlihat seperti
+	// realtime yang tidak bekerja, padahal yang rusak temboloknya. Dibuang dulu,
+	// pembacaan yang dipicu dorongan itu menghitung dari awal.
+	//
+	// Tanpa KAFKA_BROKERS konsumennya tidak menyala dan layar tetap mengandalkan
+	// polling 60 detik: angkanya tetap benar, hanya terlambat.
+	MulaiKonsumenMeta(func() {
+		warroomSvc.BuangSinggahan()
+		hub.Bump()
+	})
+
 	r := gin.Default()
 	r.MaxMultipartMemory = 32 << 20 // 32 MiB
 
