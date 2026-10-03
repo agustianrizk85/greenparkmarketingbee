@@ -86,6 +86,28 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	komentarH := NewStepCommentHandler(db)
 
 	hub := NewRealtimeHub()
+	// Hub DATA: muatannya dua sumber yang dipakai kartu Marketing di layar Empat
+	// Divisi — daftar pekerjaan dan peringatan dini. Marketing belum punya
+	// endpoint kesehatan tunggal seperti Permit & Perencanaan, jadi paketnya
+	// dirakit di sini, dengan bentuk yang SAMA seperti kedua endpoint HTTP-nya
+	// supaya layar tidak perlu dua cara membaca hal yang sama.
+	//
+	// Satu sumber gagal tidak membatalkan siaran: kartu yang separuh terisi
+	// lebih berguna bagi CEO daripada kartu yang menyerah. Keduanya gagal baru
+	// mengembalikan nil, dan layar jatuh ke jalur muat biasa.
+	hubData := NewRealtimeHubData("marketing", func() any {
+		items, errItems := itemSvc.List()
+		warnings, errWarn := dashboardSvc.EarlyWarnings()
+		if errItems != nil && errWarn != nil {
+			return nil
+		}
+		return gin.H{
+			"workItems": items,
+			"warnings":  gin.H{"warnings": warnings, "count": len(warnings)},
+		}
+	})
+	hub.Ikut(hubData)
+	hubData.MulaiSiaranBerkala(JedaWaktuBerlalu)
 	contentPlanH := NewContentPlanHandler(contentPlanSvc, sheetsClient, cfg.ContentSheetID, hub)
 	contentPlanH.StartAutoSync(context.Background())
 
@@ -138,6 +160,8 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		api.POST("/auth/login", authH.Login)
 		// Realtime push: validates its own ?token= (browsers can't set WS headers).
 		api.GET("/ws", hub.ServeWS(tokenMgr, ssoV))
+		// Soket DATA: muatan kartu ikut di tiap pesan.
+		api.GET("/ws/data", hubData.ServeWSData(tokenMgr, ssoV))
 
 		// Meta OAuth (Facebook Login) entry + callback are top-level navigations
 		// (popup / Facebook redirect) so they can't carry a bearer header:
