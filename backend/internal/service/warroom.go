@@ -270,6 +270,44 @@ func (s *WarRoomService) dariSinggahan(l WRLingkup, now time.Time) (WarRoom, boo
 	return c.wr, true
 }
 
+// SiaranLingkupBawaan mengembalikan muatan lingkup bawaan DARI SINGGAHAN saja,
+// untuk hub siaran WebSocket. ok=false berarti tidak ada yang bisa disiarkan.
+//
+// SENGAJA tidak memanggil Susun, dan itu bukan penghematan melainkan syarat
+// kebenaran. Susun meneruskan token bearer PEMANGGIL ke metaapi (sumber.Iklan,
+// sumber.IklanRinci), sedangkan siaran tidak punya pemanggil dan karena itu
+// tidak punya token. Memanggilnya dengan token kosong menghasilkan dua
+// kerusakan sekaligus: muatannya menyatakan "Akun iklan Meta belum tersambung"
+// — keterangan yang KELIRU — dan Susun MENULIS hasilnya ke singgahan, sehingga
+// keterangan keliru itu ikut tersaji ke permintaan HTTP pengguna sesudahnya.
+//
+// Jadi siaran hanya membaca apa yang sudah ada. Singgahannya dihangatkan oleh
+// permintaan HTTP pengguna sendiri (muat pertama layar, yang membawa token
+// sungguhan), dan dibuang saat metaapi mengabarkan perubahan — tepat ketika
+// angkanya memang harus diambil ulang dengan token. Di antara dua saat itu,
+// setiap tulisan disiarkan utuh tanpa satu pun permintaan HTTP.
+//
+// Toleransi umurnya LEBIH LONGGAR daripada jalur HTTP, dan itu sengaja.
+// umurSinggahan dan jeda siaran berkala sama-sama 60 detik, jadi tiap siaran
+// mendapati singgahan yang baru saja kedaluwarsa — lomba yang pasti kalah, dan
+// akibatnya setiap siaran berkala jatuh ke nil lalu memaksa seluruh penonton
+// menarik ulang. Yang dipertaruhkan di sini cuma kesegaran angka iklan, dan
+// komentar umurSinggahan sendiri menyebut angka itu berubah dalam hitungan JAM.
+// Jadi siaran boleh memakai muatan sampai tiga menit; kalau sudah lewat itu pun,
+// nil hanya berarti satu penarikan HTTP yang sekaligus menghangatkannya lagi.
+const umurSiaran = 3 * umurSinggahan
+
+func (s *WarRoomService) SiaranLingkupBawaan() (WarRoom, bool) {
+	now := s.sekarang()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ada := s.singgahan[kunciSinggahan(WRLingkup{})]
+	if !ada || now.Sub(c.pada) > umurSiaran {
+		return WarRoom{}, false
+	}
+	return c.wr, true
+}
+
 // BuangSinggahan mengosongkan seluruh muatan tersimpan.
 //
 // Dipanggil saat metaapi mengabarkan datanya berubah (lihat KonsumenMeta).

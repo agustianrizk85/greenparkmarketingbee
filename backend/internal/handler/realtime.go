@@ -45,8 +45,14 @@ type RealtimeHub struct {
 
 	// pengikut = hub data yang ikut disiarkan tiap kali hub ini di-bump, dengan
 	// nomor revisi yang SAMA. Dipasang lewat Ikut(), sehingga BumpMiddleware dan
-	// Bump() tidak perlu tahu ada hub kedua.
-	pengikut *RealtimeHub
+	// Bump() tidak perlu tahu ada hub lain.
+	//
+	// Irisan, bukan satu: satu rute /ws/data melayani DUA muatan — ringkas
+	// untuk kartu Empat Divisi dan penuh untuk War Room Marketing — dan
+	// keduanya harus disiarkan oleh bump yang sama. Dengan satu slot, hub kedua
+	// yang dipasang akan diam-diam menggantikan yang pertama, dan salah satu
+	// layar berhenti diperbarui tanpa satu galat pun.
+	pengikut []*RealtimeHub
 }
 
 // WebSocket keepalive timings. The server pings periodically and expects a pong
@@ -105,8 +111,9 @@ func NewRealtimeHubData(sumber string, muatan func() any) *RealtimeHub {
 	return h
 }
 
-// Ikut menjadikan `data` pengikut hub ini: satu bump menyiarkan ke keduanya.
-func (h *RealtimeHub) Ikut(data *RealtimeHub) { h.pengikut = data }
+// Ikut menambahkan `data` sebagai pengikut hub ini: satu bump menyiarkan ke
+// hub ini DAN ke setiap pengikut. Boleh dipanggil berkali-kali.
+func (h *RealtimeHub) Ikut(data *RealtimeHub) { h.pengikut = append(h.pengikut, data) }
 
 func (h *RealtimeHub) revision() int64 { return atomic.LoadInt64(&h.rev) }
 
@@ -120,15 +127,6 @@ func (h *RealtimeHub) pesan(rev int64) any {
 	return map[string]any{"rev": rev, "divisi": h.sumber, "data": h.muatan()}
 }
 
-// adaKlien melaporkan apakah ada yang menonton — dipakai broadcast untuk
-// MELEWATKAN muatan() saat tidak ada penonton, supaya biaya menyusun muatan
-// tidak ditanggung orang yang sedang menyimpan.
-func (h *RealtimeHub) adaKlien() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.conns) > 0
-}
-
 func (h *RealtimeHub) bump() {
 	rev := atomic.AddInt64(&h.rev, 1)
 
@@ -138,7 +136,7 @@ func (h *RealtimeHub) bump() {
 	// sampai tenggat 5 detik — dan untuk hub data, juga menunggu muatannya
 	// disusun dari dua sumber.
 	h.picu()
-	if p := h.pengikut; p != nil {
+	for _, p := range h.pengikut {
 		atomic.StoreInt64(&p.rev, rev)
 		p.picu()
 	}
@@ -163,10 +161,15 @@ func (h *RealtimeHub) broadcast(rev int64) {
 	}
 	h.mu.Unlock()
 
+	// Muatan disusun SEBELUM kunci tulis diambil: pesan() memanggil muatan(),
+	// yang menghitung ulang seluruh ringkasan divisi. Menahan kunci selama
+	// perhitungan itu membuat sinkronisasi awal koneksi BARU ikut menunggu —
+	// sendTo memakai kunci yang sama, padahal ia tidak butuh apa pun dari
+	// siaran yang sedang berjalan.
+	msg := h.pesan(rev)
+
 	h.tulis.Lock()
 	defer h.tulis.Unlock()
-
-	msg := h.pesan(rev)
 	var mati []*websocket.Conn
 	for _, c := range daftar {
 		_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))

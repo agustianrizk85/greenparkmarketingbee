@@ -106,8 +106,26 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			"warnings":  gin.H{"warnings": warnings, "count": len(warnings)},
 		}
 	})
+	// Hub DATA PENUH: yang dibaca War Room Marketing. Layar itu membaca
+	// /api/warroom (WarRoom), BUKAN {workItems, warnings} di atas — muatan
+	// ringkas itu potret KARTU untuk layar Empat Divisi. Satu rute, dua muatan;
+	// pola yang sama dengan Teknik dan Permit.
+	//
+	// Muatannya dibaca dari singgahan saja (SiaranLingkupBawaan): siaran tidak
+	// punya penonton, jadi tidak punya token untuk metaapi. nil = tidak ada yang
+	// bisa disiarkan, dan layar jatuh ke muat HTTP biasa yang sekaligus
+	// menghangatkan singgahannya kembali.
+	hubPenuh := NewRealtimeHubData("marketing", func() any {
+		wr, ada := warroomSvc.SiaranLingkupBawaan()
+		if !ada {
+			return nil
+		}
+		return wr
+	})
 	hub.Ikut(hubData)
+	hub.Ikut(hubPenuh)
 	hubData.MulaiSiaranBerkala(JedaWaktuBerlalu)
+	hubPenuh.MulaiSiaranBerkala(JedaWaktuBerlalu)
 	contentPlanH := NewContentPlanHandler(contentPlanSvc, sheetsClient, cfg.ContentSheetID, hub)
 	contentPlanH.StartAutoSync(context.Background())
 
@@ -142,6 +160,21 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		}),
 	).Start()
 
+	// Siaran lokal gp.marketing.data: group gp-marketing yang dibagi semua
+	// instance membuat Kafka menyerahkan tiap peristiwa ke SATU instance
+	// saja — penonton WS di instance lain diam dengan angka lama. Reader
+	// tanpa group membuat tiap instance menerima tiap peristiwa divisinya
+	// sendiri. Handler-nya SAMA dengan consumer di atas: singgahan War Room
+	// ikut dibuang sebelum hub dibunyikan, supaya instance lain tidak
+	// menyiarkan muatan dari tembolok yang basi.
+	kafka.NewSiaranLokal(
+		kafka.AutoConfig(kafka.SourceMarketing),
+		kafka.BumpOn(func() {
+			warroomSvc.BuangSinggahan()
+			hub.Bump()
+		}),
+	).Start()
+
 	r := gin.Default()
 	r.MaxMultipartMemory = 32 << 20 // 32 MiB
 
@@ -161,7 +194,17 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		// Realtime push: validates its own ?token= (browsers can't set WS headers).
 		api.GET("/ws", hub.ServeWS(tokenMgr, ssoV))
 		// Soket DATA: muatan kartu ikut di tiap pesan.
-		api.GET("/ws/data", hubData.ServeWSData(tokenMgr, ssoV))
+		// ?ringkas=1 memilih muatan seukuran KARTU untuk layar Empat Divisi;
+		// tanpa parameter = muatan PENUH untuk War Room Marketing.
+		layaniKartu := hubData.ServeWSData(tokenMgr, ssoV)
+		layaniPenuh := hubPenuh.ServeWSData(tokenMgr, ssoV)
+		api.GET("/ws/data", func(c *gin.Context) {
+			if c.Query("ringkas") == "1" {
+				layaniKartu(c)
+				return
+			}
+			layaniPenuh(c)
+		})
 
 		// Meta OAuth (Facebook Login) entry + callback are top-level navigations
 		// (popup / Facebook redirect) so they can't carry a bearer header:
