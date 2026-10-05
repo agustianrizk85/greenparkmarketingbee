@@ -215,7 +215,33 @@ func (h *WorkItemHandler) List(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// Paging opsional (?page=…). Tanpa `page` balasan tetap array utuh: papan
+	// kanban, Ringkasan/Performa, dan War Room membutuhkan SEMUA kartu.
+	if p, ok := mintaPaging(c.Request); ok {
+		c.JSON(http.StatusOK, halaman(items, p, kolomWorkItem))
+		return
+	}
 	c.JSON(http.StatusOK, items)
+}
+
+// kolomWorkItem — kolom GET /work-items?page=… yang bisa dicari (q) dan
+// diurutkan (sort). Nama kolom = nama field JSON-nya.
+var kolomWorkItem = map[string]Kolom[model.WorkItem]{
+	"id":                {Angka: func(w model.WorkItem) float64 { return float64(w.ID) }},
+	"title":             {Teks: func(w model.WorkItem) string { return w.Title }},
+	"project":           {Teks: func(w model.WorkItem) string { return w.Project }},
+	"alur":              {Teks: func(w model.WorkItem) string { return string(w.Alur) }},
+	"stage":             {Teks: func(w model.WorkItem) string { return string(w.Stage) }},
+	"assignee_name":     {Teks: func(w model.WorkItem) string { return w.AssigneeName }},
+	"content_type":      {Teks: func(w model.WorkItem) string { return w.ContentType }},
+	"current_step_name": {Teks: func(w model.WorkItem) string { return w.CurrentStepName }},
+	"created_at": {Angka: func(w model.WorkItem) float64 { return float64(w.CreatedAt.Unix()) }},
+	"planned_date": {Angka: func(w model.WorkItem) float64 {
+		if w.PlannedDate == nil {
+			return 0
+		}
+		return float64(w.PlannedDate.Unix())
+	}},
 }
 
 func (h *WorkItemHandler) Get(c *gin.Context) {
