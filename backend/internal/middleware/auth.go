@@ -19,7 +19,11 @@ const (
 // Auth validates the Bearer token and stores the identity in the gin context.
 // Accepts the native marketing JWT OR (when sso != nil) the unified dashboard's
 // Ed25519 SSO login token — so the dashboard can call us with ONE login.
-func Auth(tm *TokenManager, sso *authmw.Verifier) gin.HandlerFunc {
+//
+// resolve (opsional) memetakan email SSO ke id akun Marketing. Tanpa itu
+// pengguna SSO tercatat sebagai id 0, dan semua yang menulis created_by
+// (buat konten, pre-brief) ditolak foreign key fk_work_items_creator.
+func Auth(tm *TokenManager, sso *authmw.Verifier, resolve ...func(email string) uint) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" || !strings.HasPrefix(header, "Bearer ") {
@@ -35,7 +39,11 @@ func Auth(tm *TokenManager, sso *authmw.Verifier) gin.HandlerFunc {
 			return
 		}
 		if role, email, ok := SSOIdentity(sso, raw); ok {
-			c.Set(ctxUserID, uint(0)) // SSO user has no native marketing id
+			var id uint // 0 = tak ada akun Marketing yang sepadan
+			if len(resolve) > 0 && resolve[0] != nil {
+				id = resolve[0](email)
+			}
+			c.Set(ctxUserID, id)
 			c.Set(ctxRole, role)
 			c.Set(ctxEmail, email)
 			c.Next()

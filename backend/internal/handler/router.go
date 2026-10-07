@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"marketingflow/internal/authmw"
@@ -213,7 +214,7 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		api.GET("/meta/oauth/callback", metaOAuthH.Callback)
 
 		authed := api.Group("")
-		authed.Use(middleware.Auth(tokenMgr, ssoV))
+		authed.Use(middleware.Auth(tokenMgr, ssoV, akunSSO(userRepo)))
 		// Bump the realtime revision on every successful write so all connected
 		// dashboards refresh instantly.
 		authed.Use(hub.BumpMiddleware())
@@ -324,4 +325,28 @@ func NewRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	}
 
 	return r
+}
+
+// ssoAlias: identitas dashboard yang di backend ini di-seed dengan email lain
+// (sama dengan API_ID_OVERRIDE di session.service.ts dashboard).
+var ssoAlias = map[string]string{
+	"marketing@greenpark.id": "kadep@greenpark.id",
+}
+
+// akunSSO memetakan email token SSO ke id akun Marketing; 0 bila tak ada.
+func akunSSO(users *repository.UserRepository) func(string) uint {
+	return func(email string) uint {
+		e := strings.ToLower(strings.TrimSpace(email))
+		if a, ok := ssoAlias[e]; ok {
+			e = a
+		}
+		if e == "" {
+			return 0
+		}
+		u, err := users.FindByEmail(e)
+		if err != nil || u == nil {
+			return 0
+		}
+		return u.ID
+	}
 }
